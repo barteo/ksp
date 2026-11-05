@@ -24,6 +24,7 @@ import com.google.devtools.ksp.common.impl.KSNameImpl
 import com.google.devtools.ksp.containingFile
 import com.google.devtools.ksp.impl.KSPCoreEnvironment
 import com.google.devtools.ksp.impl.ResolverAAImpl
+import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSAnnotationResolvedImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSClassifierParameterImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSClassifierReferenceResolvedImpl
@@ -65,10 +66,6 @@ import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotated
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotation
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotationValue
 import org.jetbrains.kotlin.analysis.api.components.KaSubstitutorBuilder
-import org.jetbrains.kotlin.analysis.api.fir.evaluate.FirAnnotationValueConverter
-import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirSymbol
-import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirValueParameterSymbol
-import org.jetbrains.kotlin.analysis.api.fir.types.KaFirFunctionType
 import org.jetbrains.kotlin.analysis.api.impl.base.types.KaBaseStarTypeProjection
 import org.jetbrains.kotlin.analysis.api.impl.base.types.KaBaseTypeArgumentWithVariance
 import org.jetbrains.kotlin.analysis.api.platform.lifetime.KotlinAlwaysAccessibleLifetimeToken
@@ -123,18 +120,7 @@ import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap.mapKotlinToJava
 import org.jetbrains.kotlin.codegen.state.InfoForMangling
 import org.jetbrains.kotlin.codegen.state.collectFunctionSignatureForManglingSuffix
 import org.jetbrains.kotlin.codegen.state.md5base64
-import org.jetbrains.kotlin.fir.declarations.FirRegularClass
-import org.jetbrains.kotlin.fir.declarations.FirResolvePhase
-import org.jetbrains.kotlin.fir.declarations.utils.moduleName
-import org.jetbrains.kotlin.fir.java.JavaTypeParameterStack
-import org.jetbrains.kotlin.fir.java.toFirExpression
-import org.jetbrains.kotlin.fir.resolve.getContainingClassSymbol
-import org.jetbrains.kotlin.fir.symbols.SymbolInternals
-import org.jetbrains.kotlin.fir.symbols.lazyResolveToPhase
-import org.jetbrains.kotlin.fir.types.abbreviatedType
-import org.jetbrains.kotlin.fir.types.classId
 import org.jetbrains.kotlin.load.java.structure.JavaAnnotationArgument
-import org.jetbrains.kotlin.load.java.structure.impl.JavaUnknownAnnotationArgumentImpl
 import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
 import org.jetbrains.kotlin.metadata.jvm.deserialization.JvmProtoBufUtil
 import org.jetbrains.kotlin.name.ClassId
@@ -645,7 +631,7 @@ internal fun KaType.classifierSymbol(): KaClassifierSymbol? {
             // TODO: upstream is not exposing enough information for captured types.
             is KaCapturedType -> TODO("fix in upstream")
             is KaClassErrorType, is KaErrorType -> null
-            is KaFunctionType -> (this as? KaFirFunctionType)?.abbreviatedSymbol() ?: symbol
+            is KaFunctionType -> abbreviatedSymbol() ?: symbol
             is KaUsualClassType -> symbol
             is KaDefinitelyNotNullType -> original.classifierSymbol()
             is KaDynamicType -> null
@@ -752,7 +738,7 @@ internal fun KaAnnotationValue.toValue(parent: KSNode? = null, origin: Origin? =
     is KaAnnotationValue.UnsupportedValue -> null
 }
 
-@OptIn(SymbolInternals::class, KaImplementationDetail::class, KaExperimentalApi::class)
+@OptIn(KaImplementationDetail::class, KaExperimentalApi::class)
 internal fun KaValueParameterSymbol.getDefaultValue(): KaAnnotationValue? {
     return this.psi.let { psiElement ->
         when (psiElement) {
@@ -774,20 +760,10 @@ internal fun KaValueParameterSymbol.getDefaultValue(): KaAnnotationValue? {
                     jc.methods.firstOrNull { it.name == name }?.annotationParameterDefaultValue
                 }
 
-                (this as? KaFirValueParameterSymbol)?.let {
-                    val firSession = it.firSymbol.fir.moduleData.session
-                    val symbolBuilder = it.builder
-                    val expectedTypeRef = it.firSymbol.fir.returnTypeRef
-                    // when no default value is declared in the class file, ideally users should
-                    // apply a value for such property at use site, therefore value obtained here should not be
-                    // returned. In case of a user failed to do so, we try our best to return values
-                    // to ensure no annotation argument is missing from KSP side.
-                    // Supplying `JavaUnknownAnnotationArgumentImpl` as the expression base
-                    // will produce empty array for array type values and `null` for the rest of value types.
-                    val expression = (defaultValue ?: JavaUnknownAnnotationArgumentImpl(null))
-                        .toFirExpression(firSession, JavaTypeParameterStack.EMPTY, expectedTypeRef, null)
-                    FirAnnotationValueConverter.toConstantValue(expression, symbolBuilder)
-                }
+                // When the class file declares no default value, users should supply one at
+                // the use site; KcExtras still returns a best-effort value (an empty array or
+                // null) so that no annotation argument goes missing on the KSP side.
+                KcExtras.instance.javaAnnotationDefault(this, defaultValue)
             }
 
             else -> throw InternalKSPException(
@@ -1091,12 +1067,12 @@ internal fun TypeMappingMode.updateFromAnnotations(
 }
 
 internal fun KaFunctionType.abbreviatedSymbol(): KaTypeAliasSymbol? {
-    val classId = (this as? KaFirFunctionType)?.coneType?.abbreviatedType?.classId ?: return null
+    val classId = KcExtras.instance.abbreviatedTypeAlias(this) ?: return null
     return classId.toTypeAlias()
 }
 
 fun <T : KaSymbol?> T.tryResolveToTypePhase(): T {
-    (this as? KaFirSymbol<*>)?.firSymbol?.lazyResolveToPhase(FirResolvePhase.TYPES)
+    this?.let { KcExtras.instance.resolveTypes(it) }
     return this
 }
 
@@ -1163,7 +1139,6 @@ internal fun KaCallableSymbol.explictJvmName(): String? {
     }?.arguments?.single()?.expression?.toValue() as? String
 }
 
-@OptIn(SymbolInternals::class)
 internal val KaDeclarationSymbol.internalSuffix: String
     get() = analyze {
         if (visibility != KaSymbolVisibility.INTERNAL)
@@ -1190,9 +1165,7 @@ internal val KaDeclarationSymbol.internalSuffix: String
             is KaLibraryModule -> {
                 // Read module name from metadata.
                 // FIXME: need an API in AA.
-                val firSymbol = (this@internalSuffix as? KaFirSymbol<*>)?.firSymbol
-                val firClassSymbol = firSymbol?.getContainingClassSymbol()
-                val moduleName = (firClassSymbol?.fir as? FirRegularClass)?.moduleName
+                val moduleName = KcExtras.instance.libraryModuleName(this@internalSuffix)
                 (moduleName ?: JvmProtoBufUtil.DEFAULT_MODULE_NAME).toSuffix()
             }
 

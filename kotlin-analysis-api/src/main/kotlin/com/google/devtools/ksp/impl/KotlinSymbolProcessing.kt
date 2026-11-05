@@ -28,6 +28,8 @@ import com.google.devtools.ksp.common.impl.JvmPlatformInfoImpl
 import com.google.devtools.ksp.common.impl.NativePlatformInfoImpl
 import com.google.devtools.ksp.common.impl.PsiResolutionStrategy
 import com.google.devtools.ksp.common.impl.UnknownPlatformInfoImpl
+import com.google.devtools.ksp.impl.backend.KcExtras
+import com.google.devtools.ksp.impl.backend.fir.FirExtras
 import com.google.devtools.ksp.impl.symbol.kotlin.Deferrable
 import com.google.devtools.ksp.impl.symbol.kotlin.KSFileImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.KSFileJavaImpl
@@ -480,6 +482,7 @@ class KotlinSymbolProcessing(
             val (analysisAPISession, env, modules) =
                 createAASession(projectDisposable)
             kotlinCoreProjectEnvironment = env
+            KcExtras.instance = FirExtras()
             val project = analysisAPISession.project
             // Initializes it
             KSPCoreEnvironment(project as MockProject)
@@ -643,6 +646,7 @@ class KotlinSymbolProcessing(
                 Disposer.dispose(projectDisposable)
                 ResolverAAImpl.tearDown()
                 KSPCoreEnvironment.tearDown()
+                KcExtras.tearDown()
             }
         }
 

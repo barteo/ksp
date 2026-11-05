@@ -30,7 +30,6 @@ import org.jetbrains.kotlin.analysis.api.symbols.KaPropertySymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaSymbolOrigin
 import org.jetbrains.kotlin.analysis.api.symbols.KaValueParameterSymbol
 import org.jetbrains.kotlin.analysis.api.types.abbreviationOrSelf
-import org.jetbrains.kotlin.fir.symbols.SymbolInternals
 
 class KSValueParameterImpl private constructor(
     private val ktValueParameterSymbol: KaValueParameterSymbol,
@@ -49,7 +48,6 @@ class KSValueParameterImpl private constructor(
         }
     }
 
-    @OptIn(SymbolInternals::class)
     override val type: KSTypeReference by lazy {
         // TODO: avoid eager resolution by using PSI.
         // KaFirValueParameterSymbol extracts and returns the element type of a vararg.

@@ -42,6 +42,7 @@ import com.google.devtools.ksp.common.lazyMemoizedSequence
 import com.google.devtools.ksp.getClassDeclarationByName
 import com.google.devtools.ksp.getDeclaredFunctions
 import com.google.devtools.ksp.getDeclaredProperties
+import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.symbol.java.KSAnnotationJavaImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.AbstractKSDeclarationImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.KSClassDeclarationEnumEntryImpl
@@ -115,9 +116,8 @@ import com.intellij.psi.PsiMethod
 import com.intellij.psi.impl.file.impl.JavaFileManager
 import org.jetbrains.kotlin.analysis.api.KaExperimentalApi
 import org.jetbrains.kotlin.analysis.api.components.buildSubstitutor
-import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirSymbol
-import org.jetbrains.kotlin.analysis.api.fir.types.KaFirType
 import org.jetbrains.kotlin.analysis.api.projectStructure.KaSourceModule
+import org.jetbrains.kotlin.analysis.api.symbols.KaCallableSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaEnumEntrySymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaFunctionSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaJavaFieldSymbol
@@ -128,20 +128,12 @@ import org.jetbrains.kotlin.analysis.api.symbols.KaSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaTypeAliasSymbol
 import org.jetbrains.kotlin.analysis.api.types.KaType
 import org.jetbrains.kotlin.analysis.api.types.symbol
-import org.jetbrains.kotlin.analysis.decompiler.stub.file.ClsKotlinBinaryClassCache
-import org.jetbrains.kotlin.analysis.low.level.api.fir.api.getResolutionFacade
 import org.jetbrains.kotlin.asJava.classes.KtLightClassForFacade
 import org.jetbrains.kotlin.asJava.findFacadeClass
 import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCliJavaFileManagerImpl
-import org.jetbrains.kotlin.fir.symbols.impl.FirCallableSymbol
-import org.jetbrains.kotlin.fir.types.isRaw
-import org.jetbrains.kotlin.fir.types.typeContext
 import org.jetbrains.kotlin.load.java.JvmAbi
-import org.jetbrains.kotlin.load.kotlin.JvmPackagePartSource
 import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
-import org.jetbrains.kotlin.load.kotlin.getOptimalModeForReturnType
-import org.jetbrains.kotlin.load.kotlin.getOptimalModeForValueParameter
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.FqNameUnsafe
@@ -190,7 +182,6 @@ class ResolverAAImpl(
     lateinit var propertyAsMemberOfCache: MutableMap<Pair<KSPropertyDeclaration, KSType>, KSType>
     lateinit var functionAsMemberOfCache: MutableMap<Pair<KSFunctionDeclaration, KSType>, KSFunction>
     val javaFileManager = project.getService(JavaFileManager::class.java) as KotlinCliJavaFileManagerImpl
-    private val classBinaryCache = ClsKotlinBinaryClassCache()
     private val packageInfoFiles by lazyMemoizedSequence {
         allKSFiles.filter { it.fileName == "package-info.java" }.asSequence()
     }
@@ -445,7 +436,7 @@ class ResolverAAImpl(
 
         val classId = parentClass.ktClassOrObjectSymbol.classId ?: return container.declarations
         val virtualFile = classId.getVirtualFile(fileManager) ?: return container.declarations
-        val kotlinClass = classBinaryCache.getKotlinBinaryClass(virtualFile) ?: return container.declarations
+        val kotlinClass = KcExtras.instance.kotlinBinaryClass(virtualFile) ?: return container.declarations
         val declarationOrdering = DeclarationOrdering(kotlinClass)
 
         @Suppress("UNCHECKED_CAST")
@@ -481,19 +472,16 @@ class ResolverAAImpl(
             return reference
         val position = findRefPosition(ref)
         val ktType = (type as KSTypeImpl).type.fullyExpand()
-        // cast to FIR internal needed due to missing support in AA for type mapping mode
-        // and corresponding type mapping APIs.
-        val coneType = (ktType as KaFirType).coneType
+        // AA has no type mapping mode APIs; KcExtras provides them.
         val mode = analyze {
-            val typeContext = analyze { useSiteModule.getResolutionFacade(project).useSiteFirSession.typeContext }
             when (position) {
-                RefPosition.RETURN_TYPE -> typeContext.getOptimalModeForReturnType(
-                    coneType,
+                RefPosition.RETURN_TYPE -> KcExtras.instance.optimalModeForReturnType(
+                    ktType,
                     reference.isReturnTypeOfAnnotationMethod()
                 )
 
                 RefPosition.SUPER_TYPE -> TypeMappingMode.SUPER_TYPE
-                RefPosition.PARAMETER_TYPE -> typeContext.getOptimalModeForValueParameter(coneType)
+                RefPosition.PARAMETER_TYPE -> KcExtras.instance.optimalModeForValueParameter(ktType)
             }.updateFromParents(ref)
         }
         return analyze {
@@ -634,11 +622,9 @@ class ResolverAAImpl(
                 ((it.ktFileSymbol.psi as? KtFile)?.findFacadeClass() as? KtLightClassForFacade)
                     ?.facadeClassFqName?.asString()
             }
-            // Down cast to fir symbol for library symbols as light facade class for libraries not available in AA.
-        } ?: (
-            ((declaration as? AbstractKSDeclarationImpl)?.ktDeclarationSymbol as? KaFirSymbol<FirCallableSymbol<*>>)
-                ?.firSymbol?.containerSource as? JvmPackagePartSource
-            )?.classId?.asFqNameString()
+            // Light facade classes for libraries are not available in AA; KcExtras finds the facade.
+        } ?: ((declaration as? AbstractKSDeclarationImpl)?.ktDeclarationSymbol as? KaCallableSymbol)
+            ?.let { KcExtras.instance.packagePartClass(it) }?.asFqNameString()
     }
 
     override fun getOwnerJvmClassName(declaration: KSFunctionDeclaration): String? {
@@ -696,7 +682,7 @@ class ResolverAAImpl(
     }
 
     override fun isJavaRawType(type: KSType): Boolean {
-        return type is KSTypeImpl && (type.type as KaFirType).coneType.isRaw()
+        return type is KSTypeImpl && KcExtras.instance.isRawType(type.type)
     }
 
     internal fun KSFile.getPackageAnnotations() = (this as? KSFileJavaImpl)?.psi?.packageStatement?.annotationList

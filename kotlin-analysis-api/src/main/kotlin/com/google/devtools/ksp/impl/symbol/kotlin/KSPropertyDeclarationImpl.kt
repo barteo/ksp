@@ -24,6 +24,7 @@ import com.google.devtools.ksp.common.KSObjectCache
 import com.google.devtools.ksp.common.impl.KSNameImpl
 import com.google.devtools.ksp.common.lazyMemoizedSequence
 import com.google.devtools.ksp.impl.ResolverAAImpl
+import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.recordLookupForPropertyOrMethod
 import com.google.devtools.ksp.impl.recordLookupWithSupertypes
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSAnnotationResolvedImpl
@@ -34,7 +35,6 @@ import com.intellij.psi.PsiClass
 import org.jetbrains.kotlin.analysis.api.KaConstantInitializerValue
 import org.jetbrains.kotlin.analysis.api.KaExperimentalApi
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotation
-import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirKotlinPropertySymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaKotlinPropertySymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaPropertySymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaSymbolModality
@@ -42,8 +42,6 @@ import org.jetbrains.kotlin.analysis.api.symbols.KaSymbolVisibility
 import org.jetbrains.kotlin.analysis.api.symbols.receiverType
 import org.jetbrains.kotlin.analysis.api.types.abbreviationOrSelf
 import org.jetbrains.kotlin.descriptors.annotations.AnnotationUseSiteTarget
-import org.jetbrains.kotlin.load.kotlin.JvmPackagePartSource
-import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinarySourceElement
 import org.jetbrains.kotlin.psi.KtAnnotationEntry
 import org.jetbrains.kotlin.psi.KtProperty
 
@@ -132,14 +130,9 @@ class KSPropertyDeclarationImpl private constructor(internal val ktPropertySymbo
                 else -> {
                     if (!ResolverAAImpl.instance.isJvm)
                         return@lazy ktPropertySymbol.hasBackingField
-                    val classId = when (
-                        val containerSource =
-                            (ktPropertySymbol as? KaFirKotlinPropertySymbol<*>)?.firSymbol?.containerSource
-                    ) {
-                        is JvmPackagePartSource -> containerSource.classId
-                        is KotlinJvmBinarySourceElement -> containerSource.binaryClass.classId
-                        else -> null
-                    } ?: return@lazy ktPropertySymbol.hasBackingField
+                    val classId = (ktPropertySymbol as? KaKotlinPropertySymbol)
+                        ?.let { KcExtras.instance.binaryContainerClass(it) }
+                        ?: return@lazy ktPropertySymbol.hasBackingField
                     val fileManager = ResolverAAImpl.instance.javaFileManager
                     BinaryClassInfoCache.getCached(classId, fileManager)
                         ?.fieldAccFlags?.containsKey(simpleName.asString()) ?: ktPropertySymbol.hasBackingField
