@@ -128,8 +128,6 @@ import org.jetbrains.kotlin.analysis.api.symbols.KaSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaTypeAliasSymbol
 import org.jetbrains.kotlin.analysis.api.types.KaType
 import org.jetbrains.kotlin.analysis.api.types.symbol
-import org.jetbrains.kotlin.asJava.classes.KtLightClassForFacade
-import org.jetbrains.kotlin.asJava.findFacadeClass
 import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCliJavaFileManagerImpl
 import org.jetbrains.kotlin.load.java.JvmAbi
@@ -619,8 +617,7 @@ class ResolverAAImpl(
         } ?: declaration.containingFile?.let {
             // Find containing file facade class name from file symbol
             (it as? KSFileImpl)?.let {
-                ((it.ktFileSymbol.psi as? KtFile)?.findFacadeClass() as? KtLightClassForFacade)
-                    ?.facadeClassFqName?.asString()
+                (it.ktFileSymbol.psi as? KtFile)?.let { f -> KcExtras.instance.fileFacadeClass(f) }?.asString()
             }
             // Light facade classes for libraries are not available in AA; KcExtras finds the facade.
         } ?: ((declaration as? AbstractKSDeclarationImpl)?.ktDeclarationSymbol as? KaCallableSymbol)

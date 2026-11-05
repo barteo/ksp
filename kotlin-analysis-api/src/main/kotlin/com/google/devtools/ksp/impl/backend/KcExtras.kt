@@ -28,6 +28,8 @@ import org.jetbrains.kotlin.load.java.structure.JavaAnnotationArgument
 import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinaryClass
 import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
 import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.psi.KtFile
 
 /**
  * The facts KSP needs that the public Analysis API doesn't offer.
@@ -57,6 +59,12 @@ interface KcExtras {
      * `JvmPackagePartSource` that is its `containerSource`, else null.
      */
     fun packagePartClass(symbol: KaCallableSymbol): ClassId?
+
+    /**
+     * The facade class of a source file's top-level callables: the
+     * `facadeClassFqName` of its `KtLightClassForFacade`, else null.
+     */
+    fun fileFacadeClass(file: KtFile): FqName?
 
     /**
      * The class a library property is compiled into: the class id of its

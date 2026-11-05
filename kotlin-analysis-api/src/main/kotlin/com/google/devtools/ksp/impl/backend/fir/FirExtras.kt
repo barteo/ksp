@@ -37,6 +37,8 @@ import org.jetbrains.kotlin.analysis.api.types.KaFunctionType
 import org.jetbrains.kotlin.analysis.api.types.KaType
 import org.jetbrains.kotlin.analysis.decompiler.stub.file.ClsKotlinBinaryClassCache
 import org.jetbrains.kotlin.analysis.low.level.api.fir.api.getResolutionFacade
+import org.jetbrains.kotlin.asJava.classes.KtLightClassForFacade
+import org.jetbrains.kotlin.asJava.findFacadeClass
 import org.jetbrains.kotlin.fir.declarations.FirRegularClass
 import org.jetbrains.kotlin.fir.declarations.FirResolvePhase
 import org.jetbrains.kotlin.fir.declarations.utils.moduleName
@@ -59,6 +61,8 @@ import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
 import org.jetbrains.kotlin.load.kotlin.getOptimalModeForReturnType
 import org.jetbrains.kotlin.load.kotlin.getOptimalModeForValueParameter
 import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.psi.KtFile
 
 /** [KcExtras] for the stock, FIR based Analysis API: the casts KSP used to make inline. */
 @OptIn(SymbolInternals::class)
@@ -84,6 +88,9 @@ class FirExtras : KcExtras {
     override fun packagePartClass(symbol: KaCallableSymbol): ClassId? =
         ((symbol as? KaFirSymbol<FirCallableSymbol<*>>)?.firSymbol?.containerSource as? JvmPackagePartSource)
             ?.classId
+
+    override fun fileFacadeClass(file: KtFile): FqName? =
+        (file.findFacadeClass() as? KtLightClassForFacade)?.facadeClassFqName
 
     override fun binaryContainerClass(symbol: KaKotlinPropertySymbol): ClassId? =
         when (val containerSource = (symbol as? KaFirKotlinPropertySymbol<*>)?.firSymbol?.containerSource) {
