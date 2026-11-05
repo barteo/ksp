@@ -11,7 +11,6 @@ import org.jetbrains.kotlin.name.ClassId
 fun getExtensionFunctionTypeAnnotation() = KaAnnotationImpl(
     ClassId.fromString(ExtensionFunctionType::class.qualifiedName!!),
     null,
-    null,
     lazyOf(emptyList()),
     null,
     KotlinAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project)

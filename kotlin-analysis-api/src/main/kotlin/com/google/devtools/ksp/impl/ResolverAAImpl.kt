@@ -817,7 +817,7 @@ class ResolverAAImpl(
     internal fun mapToJvmSignatureInternal(ksAnnotated: KSAnnotated): String? {
         fun KaType.toSignature(): String {
             return analyze {
-                this@toSignature.mapToJvmType().descriptor.let {
+                this@toSignature.mapToJvmTypeDescriptor().let {
                     when (it) {
                         "Ljava.lang.Void;" -> "Ljava/lang/Void;"
                         "Lkotlin/Unit;" -> "V"

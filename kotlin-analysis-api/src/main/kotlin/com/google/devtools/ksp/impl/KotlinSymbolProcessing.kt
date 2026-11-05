@@ -708,7 +708,7 @@ fun TargetPlatform.getPlatformInfo(kspConfig: KSPConfig): List<PlatformInfo> =
 private fun <R> maybeRunInWriteAction(f: () -> R) {
     synchronized(EDT::class.java) {
         if (!EDT.isCurrentThreadEdt())
-            EDT.updateEdt()
+            updateEdt()
         if (ApplicationManager.getApplication() != null) {
             runWriteAction {
                 f()
@@ -716,6 +716,18 @@ private fun <R> maybeRunInWriteAction(f: () -> R) {
         } else {
             f()
         }
+    }
+}
+
+// EDT.updateEdt() makes the current thread the EDT. It is internal, and the
+// IntelliJ core bundled in kotlin-compiler lacks it, so it is called
+// reflectively, falling back to setting the field it sets.
+private fun updateEdt() {
+    val edt = EDT::class.java
+    try {
+        edt.getDeclaredMethod("updateEdt").apply { isAccessible = true }.invoke(null)
+    } catch (_: NoSuchMethodException) {
+        edt.getDeclaredField("myEventDispatchThread").apply { isAccessible = true }.set(null, Thread.currentThread())
     }
 }
 
