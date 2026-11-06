@@ -17,6 +17,7 @@
 package com.google.devtools.ksp.impl.backend
 
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiAnnotation
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotationValue
 import org.jetbrains.kotlin.analysis.api.symbols.KaCallableSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaKotlinPropertySymbol
@@ -91,6 +92,13 @@ interface KcExtras {
 
     /** Reads the Kotlin class in a class file: `ClsKotlinBinaryClassCache.getKotlinBinaryClass`. */
     fun kotlinBinaryClass(file: VirtualFile): KotlinJvmBinaryClass?
+
+    /**
+     * The class of a Java annotation that `resolveAnnotationType()` doesn't
+     * resolve, else null. With FIR, light classes make every Kotlin class
+     * resolvable from Java, so this is always null there.
+     */
+    fun javaAnnotationClass(annotation: PsiAnnotation): ClassId?
 
     companion object {
         private val current: ThreadLocal<KcExtras> = ThreadLocal()

@@ -22,6 +22,7 @@ import com.google.devtools.ksp.impl.ResolverAAImpl
 import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.symbol.kotlin.analyze
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiAnnotation
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotationValue
 import org.jetbrains.kotlin.analysis.api.fir.evaluate.FirAnnotationValueConverter
 import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirKotlinPropertySymbol
@@ -129,4 +130,6 @@ class FirExtras : KcExtras {
 
     override fun kotlinBinaryClass(file: VirtualFile): KotlinJvmBinaryClass? =
         classBinaryCache.getKotlinBinaryClass(file)
+
+    override fun javaAnnotationClass(annotation: PsiAnnotation): ClassId? = null
 }

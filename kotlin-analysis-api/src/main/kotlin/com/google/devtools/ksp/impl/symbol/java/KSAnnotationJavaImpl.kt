@@ -4,6 +4,7 @@ import com.google.devtools.ksp.common.KSObjectCache
 import com.google.devtools.ksp.common.impl.KSNameImpl
 import com.google.devtools.ksp.getClassDeclarationByName
 import com.google.devtools.ksp.impl.ResolverAAImpl
+import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.symbol.kotlin.KSClassDeclarationEnumEntryImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.KSErrorType
 import com.google.devtools.ksp.impl.symbol.kotlin.KSValueArgumentImpl
@@ -62,7 +63,8 @@ class KSAnnotationJavaImpl private constructor(private val psi: PsiAnnotation, o
         }
         analyze {
             val resolved = psi.resolveAnnotationType()
-            val fqn = resolved?.fqn() ?: "__KSP_unresolved_${psi.qualifiedName}"
+            val fqn = resolved?.fqn() ?: KcExtras.instance.javaAnnotationClass(psi)?.asString()
+                ?: "__KSP_unresolved_${psi.qualifiedName}"
             val classId = ClassId.fromString(fqn)
             buildClassType(classId)
         }
