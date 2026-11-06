@@ -136,4 +136,6 @@ class FirExtras : KcExtras {
     override fun javaAnnotationClass(annotation: PsiAnnotation): ClassId? = null
 
     override fun javaEnumEntry(reference: PsiReferenceExpression): CallableId? = null
+
+    override fun javaConstant(reference: PsiReferenceExpression): Any? = null
 }

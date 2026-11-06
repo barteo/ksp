@@ -109,6 +109,14 @@ interface KcExtras {
      */
     fun javaEnumEntry(reference: PsiReferenceExpression): CallableId?
 
+    /**
+     * The value of the Kotlin `const val` that Java reference `C.X`, an
+     * annotation argument, names when Java PSI doesn't resolve it, as
+     * `computeConstantExpression` would give it, else null. Always null
+     * with FIR, as [javaAnnotationClass] is.
+     */
+    fun javaConstant(reference: PsiReferenceExpression): Any?
+
     companion object {
         private val current: ThreadLocal<KcExtras> = ThreadLocal()
 

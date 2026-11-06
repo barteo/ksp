@@ -186,7 +186,8 @@ fun calcValue(value: PsiAnnotationMemberValue?): Any? {
         is PsiReference -> value.resolve()?.let { resolved ->
             JavaPsiFacade.getInstance(value.project).constantEvaluationHelper.computeConstantExpression(value)
                 ?: resolved
-        } ?: (value as? PsiReferenceExpression)?.let { KcExtras.instance.javaEnumEntry(it) }?.let { entry ->
+        } ?: (value as? PsiReferenceExpression)?.let { KcExtras.instance.javaConstant(it) }
+            ?: (value as? PsiReferenceExpression)?.let { KcExtras.instance.javaEnumEntry(it) }?.let { entry ->
             return ResolverAAImpl.instance.getClassDeclarationByName(entry.classId!!.asFqNameString())
                 ?.declarations?.find {
                     it is KSClassDeclaration && it.classKind == ClassKind.ENUM_ENTRY &&
