@@ -37,6 +37,7 @@ import com.intellij.psi.PsiField
 import com.intellij.psi.PsiLiteralValue
 import com.intellij.psi.PsiPrimitiveType
 import com.intellij.psi.PsiReference
+import com.intellij.psi.PsiReferenceExpression
 import com.intellij.psi.PsiType
 import com.intellij.psi.impl.compiled.ClsClassImpl
 import org.jetbrains.kotlin.analysis.api.KaImplementationDetail
@@ -185,6 +186,12 @@ fun calcValue(value: PsiAnnotationMemberValue?): Any? {
         is PsiReference -> value.resolve()?.let { resolved ->
             JavaPsiFacade.getInstance(value.project).constantEvaluationHelper.computeConstantExpression(value)
                 ?: resolved
+        } ?: (value as? PsiReferenceExpression)?.let { KcExtras.instance.javaEnumEntry(it) }?.let { entry ->
+            return ResolverAAImpl.instance.getClassDeclarationByName(entry.classId!!.asFqNameString())
+                ?.declarations?.find {
+                    it is KSClassDeclaration && it.classKind == ClassKind.ENUM_ENTRY &&
+                        it.simpleName.asString() == entry.callableName.asString()
+                } as? KSClassDeclarationEnumEntryImpl
         }
 
         else -> value?.let {

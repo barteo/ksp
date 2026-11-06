@@ -18,6 +18,7 @@ package com.google.devtools.ksp.impl.backend
 
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiAnnotation
+import com.intellij.psi.PsiReferenceExpression
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotationValue
 import org.jetbrains.kotlin.analysis.api.symbols.KaCallableSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaKotlinPropertySymbol
@@ -28,6 +29,7 @@ import org.jetbrains.kotlin.analysis.api.types.KaType
 import org.jetbrains.kotlin.load.java.structure.JavaAnnotationArgument
 import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinaryClass
 import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
+import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.psi.KtFile
@@ -99,6 +101,13 @@ interface KcExtras {
      * resolvable from Java, so this is always null there.
      */
     fun javaAnnotationClass(annotation: PsiAnnotation): ClassId?
+
+    /**
+     * The Kotlin enum entry that Java reference `E.X`, an annotation
+     * argument, names when Java PSI doesn't resolve it, else null. Always
+     * null with FIR, as [javaAnnotationClass] is.
+     */
+    fun javaEnumEntry(reference: PsiReferenceExpression): CallableId?
 
     companion object {
         private val current: ThreadLocal<KcExtras> = ThreadLocal()

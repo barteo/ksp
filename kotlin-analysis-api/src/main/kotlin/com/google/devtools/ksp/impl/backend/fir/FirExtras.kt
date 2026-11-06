@@ -23,6 +23,7 @@ import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.symbol.kotlin.analyze
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiAnnotation
+import com.intellij.psi.PsiReferenceExpression
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotationValue
 import org.jetbrains.kotlin.analysis.api.fir.evaluate.FirAnnotationValueConverter
 import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirKotlinPropertySymbol
@@ -61,6 +62,7 @@ import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinarySourceElement
 import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
 import org.jetbrains.kotlin.load.kotlin.getOptimalModeForReturnType
 import org.jetbrains.kotlin.load.kotlin.getOptimalModeForValueParameter
+import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.psi.KtFile
@@ -132,4 +134,6 @@ class FirExtras : KcExtras {
         classBinaryCache.getKotlinBinaryClass(file)
 
     override fun javaAnnotationClass(annotation: PsiAnnotation): ClassId? = null
+
+    override fun javaEnumEntry(reference: PsiReferenceExpression): CallableId? = null
 }
