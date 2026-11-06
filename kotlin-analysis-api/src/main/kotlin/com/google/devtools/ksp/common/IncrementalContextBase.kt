@@ -82,8 +82,13 @@ abstract class IncrementalContextBase(
     // Symbols defined in each file. This is saved across processing.
     protected val symbolsMap = FileToSymbolsMap(File(cachesDir, "symbols"))
 
-    private val cachesUpToDateFile = File(cachesDir, "caches.uptodate")
+    private val cachesUpToDateFile = File(cachesDir, CACHES_UP_TO_DATE)
     private val rebuild = !cachesUpToDateFile.exists()
+
+    companion object {
+        /** The marker of caches a later incremental run may trust; without it, the run rebuilds. */
+        const val CACHES_UP_TO_DATE = "caches.uptodate"
+    }
 
     private val logsDir = File(cachesDir, "logs").apply { mkdirs() }
     private val buildTime = Date().time

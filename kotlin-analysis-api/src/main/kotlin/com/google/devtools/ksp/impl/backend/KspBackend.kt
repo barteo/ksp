@@ -80,6 +80,14 @@ interface KspBackendSession {
     /** Called before each round, with the tracker the round records lookups in. */
     fun beginRound(lookupTracker: DualLookupTracker)
 
+    /**
+     * Whether the tracker [beginRound] gets receives the front end's lookups.
+     * When it doesn't, an incremental run rebuilds, processing all files, and
+     * leaves the caches marked stale, since they miss the dependencies of
+     * Kotlin sources.
+     */
+    val recordsLookups: Boolean get() = true
+
     /** Invalidates analysis caches after a round generated files; called in a write action. */
     fun dropCaches()
 

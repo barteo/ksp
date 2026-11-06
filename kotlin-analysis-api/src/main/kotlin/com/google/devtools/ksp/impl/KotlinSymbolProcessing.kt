@@ -18,6 +18,7 @@
 package com.google.devtools.ksp.impl
 
 import com.google.devtools.ksp.common.AnyChanges
+import com.google.devtools.ksp.common.IncrementalContextBase
 import com.google.devtools.ksp.common.KSObjectCacheManager
 import com.google.devtools.ksp.common.impl.AAResolutionStrategy
 import com.google.devtools.ksp.common.impl.CodeGeneratorImpl
@@ -92,8 +93,18 @@ class KotlinSymbolProcessing(
 
         val projectDisposable: Disposable = Disposer.newDisposable("StandaloneAnalysisAPISession.project")
         var session: KspBackendSession? = null
+        val cachesUpToDate = File(kspConfig.cachesDir, IncrementalContextBase.CACHES_UP_TO_DATE)
+        var rebuildEveryRun = false
         try {
             session = backend.open(kspConfig, projectDisposable)
+            if (kspConfig.incremental && !session.recordsLookups) {
+                // Without the front end's lookups the caches miss the Kotlin sources' dependencies:
+                // rebuild, processing all files, and leave the caches marked stale (below) so that
+                // the next run rebuilds too. KSP's own lookups (Java sources) are still recorded.
+                rebuildEveryRun = true
+                cachesUpToDate.delete()
+                logger.info("the ${backend.name} backend records no lookups; processing all files")
+            }
             KcExtras.instance = session.extras
             val project = session.project
             // Initializes it
@@ -233,6 +244,8 @@ class KotlinSymbolProcessing(
             dropCaches()
             codeGenerator.closeFiles()
         } finally {
+            if (rebuildEveryRun)
+                cachesUpToDate.delete()
             maybeRunInWriteAction {
                 session?.close()
                 Disposer.dispose(projectDisposable)
