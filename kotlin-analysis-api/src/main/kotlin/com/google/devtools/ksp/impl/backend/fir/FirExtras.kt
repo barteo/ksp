@@ -24,6 +24,7 @@ import com.google.devtools.ksp.impl.symbol.kotlin.analyze
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiReferenceExpression
+import org.jetbrains.kotlin.analysis.api.KaImplementationDetail
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotationValue
 import org.jetbrains.kotlin.analysis.api.fir.evaluate.FirAnnotationValueConverter
 import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirKotlinPropertySymbol
@@ -71,6 +72,7 @@ import org.jetbrains.kotlin.psi.KtFile
 class FirExtras : KcExtras {
     private val classBinaryCache = ClsKotlinBinaryClassCache()
 
+    @OptIn(KaImplementationDetail::class)
     private fun typeContext() = analyze {
         useSiteModule.getResolutionFacade(ResolverAAImpl.instance.project).useSiteFirSession.typeContext
     }

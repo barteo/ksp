@@ -207,6 +207,7 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
 
     override fun sourceFiles(): List<KSFile> = prepareAllKSFiles(env, modules, javaFileManager)
 
+    @OptIn(KaImplementationDetail::class)
     override fun beginRound(lookupTracker: DualLookupTracker) {
         // FirSession in AA is created lazily. Getting it instantiates module providers, which requires source roots
         // to be resolved. Therefore, due to the implementation, it has to be registered repeatedly after the files
