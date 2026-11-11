@@ -18,9 +18,11 @@
 
 package com.google.devtools.ksp.impl
 
+import com.google.devtools.ksp.ApiFeatures
 import com.google.devtools.ksp.InternalKSPException
 import com.google.devtools.ksp.InternalKSPException.Companion.render
 import com.google.devtools.ksp.KspExperimental
+import com.google.devtools.ksp.buildApiFeatures
 import com.google.devtools.ksp.closestClassDeclaration
 import com.google.devtools.ksp.common.JVM_DEFAULT_ANNOTATION_FQN
 import com.google.devtools.ksp.common.JVM_DEFAULT_WITHOUT_COMPATIBILITY_ANNOTATION_FQN
@@ -42,6 +44,7 @@ import com.google.devtools.ksp.common.lazyMemoizedSequence
 import com.google.devtools.ksp.getClassDeclarationByName
 import com.google.devtools.ksp.getDeclaredFunctions
 import com.google.devtools.ksp.getDeclaredProperties
+import com.google.devtools.ksp.getVisibility
 import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.symbol.java.KSAnnotationJavaImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.AbstractKSDeclarationImpl
@@ -66,6 +69,7 @@ import com.google.devtools.ksp.impl.symbol.kotlin.findParentOfType
 import com.google.devtools.ksp.impl.symbol.kotlin.fullyExpand
 import com.google.devtools.ksp.impl.symbol.kotlin.inlineSuffix
 import com.google.devtools.ksp.impl.symbol.kotlin.internalSuffix
+import com.google.devtools.ksp.impl.symbol.kotlin.isJvmRecord
 import com.google.devtools.ksp.impl.symbol.kotlin.toKSDeclaration
 import com.google.devtools.ksp.impl.symbol.kotlin.toKSName
 import com.google.devtools.ksp.impl.symbol.kotlin.toKtClassSymbol
@@ -78,20 +82,18 @@ import com.google.devtools.ksp.impl.symbol.util.DeclarationOrdering
 import com.google.devtools.ksp.impl.symbol.util.extractThrowsFromClassFile
 import com.google.devtools.ksp.impl.symbol.util.getFileContent
 import com.google.devtools.ksp.impl.symbol.util.getVirtualFile
-import com.google.devtools.ksp.impl.symbol.util.hasAnnotation
 import com.google.devtools.ksp.isAbstract
 import com.google.devtools.ksp.isConstructor
 import com.google.devtools.ksp.isOpen
-import com.google.devtools.ksp.isPrivate
-import com.google.devtools.ksp.isProtected
-import com.google.devtools.ksp.isPublic
 import com.google.devtools.ksp.isVisibleFrom
 import com.google.devtools.ksp.processing.KSBuiltIns
 import com.google.devtools.ksp.processing.KSPConfig
 import com.google.devtools.ksp.processing.Resolver
+import com.google.devtools.ksp.processing.SymbolProcessor
 import com.google.devtools.ksp.symbol.ClassKind
 import com.google.devtools.ksp.symbol.KSAnnotated
 import com.google.devtools.ksp.symbol.KSAnnotation
+import com.google.devtools.ksp.symbol.KSBackingField
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSClassifierReference
 import com.google.devtools.ksp.symbol.KSDeclaration
@@ -111,10 +113,12 @@ import com.google.devtools.ksp.symbol.KSTypeReference
 import com.google.devtools.ksp.symbol.Modifier
 import com.google.devtools.ksp.symbol.Origin
 import com.google.devtools.ksp.symbol.Variance
+import com.google.devtools.ksp.symbol.Visibility
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.impl.file.impl.JavaFileManager
 import org.jetbrains.kotlin.analysis.api.KaExperimentalApi
+import org.jetbrains.kotlin.analysis.api.KaImplementationDetail
 import org.jetbrains.kotlin.analysis.api.components.buildSubstitutor
 import org.jetbrains.kotlin.analysis.api.projectStructure.KaSourceModule
 import org.jetbrains.kotlin.analysis.api.symbols.KaCallableSymbol
@@ -147,6 +151,7 @@ class ResolverAAImpl(
     val project: Project,
     val incrementalContext: IncrementalContextAA,
     val resolutionStrategy: AnnotationResolutionStrategy,
+    val processorsRegisteredForNewFeatures: Set<SymbolProcessor>,
 ) : Resolver {
     companion object {
         private val instance_prop: ThreadLocal<ResolverAAImpl> = ThreadLocal()
@@ -176,6 +181,20 @@ class ResolverAAImpl(
             kspConfig_prop.remove()
         }
     }
+
+    private val LEGACY_REGISTERED_API_FEATURES: ApiFeatures = buildApiFeatures {
+        enableBackingFields = true
+        enableContextParameters = false
+    }
+
+    lateinit var currentProcessor: SymbolProcessor
+
+    internal val currentApiFeatures: ApiFeatures
+        get() = if (currentProcessor in processorsRegisteredForNewFeatures) {
+            LEGACY_REGISTERED_API_FEATURES
+        } else {
+            currentProcessor.apiFeatures
+        }
 
     lateinit var propertyAsMemberOfCache: MutableMap<Pair<KSPropertyDeclaration, KSType>, KSType>
     lateinit var functionAsMemberOfCache: MutableMap<Pair<KSFunctionDeclaration, KSType>, KSFunction>
@@ -219,100 +238,118 @@ class ResolverAAImpl(
         return KSTypeReferenceSyntheticImpl.getCached(type, null)
     }
 
-    override fun effectiveJavaModifiers(declaration: KSDeclaration): Set<Modifier> {
-        val modifiers = HashSet<Modifier>(declaration.modifiers.filter { it in javaModifiers })
+    override fun effectiveJavaModifiers(declaration: KSDeclaration): Set<Modifier> = when (declaration.origin) {
+        Origin.JAVA, Origin.KOTLIN ->
+            existingJavaModifiers(declaration) +
+                kotlinAnnotationsToModifiersIfApplicableTo(declaration) +
+                setOfNotNull(
+                    visibilityModifier(declaration),
+                    abstractModifierIfApplicableTo(declaration),
+                    finalModifierIfApplicableTo(declaration),
+                    staticModifierIfApplicableTo(declaration),
+                )
 
-        // This is only needed by sources.
-        // PUBLIC, PRIVATE, PROTECTED are already handled in descriptor based impls.
-        fun addVisibilityModifiers() {
-            when {
-                declaration.isPublic() -> modifiers.add(Modifier.PUBLIC)
-                declaration.isPrivate() -> modifiers.add(Modifier.PRIVATE)
-                declaration.isProtected() -> modifiers.add(Modifier.PROTECTED)
-            }
-        }
+        Origin.JAVA_LIB, Origin.KOTLIN_LIB ->
+            existingJavaModifiers(declaration) +
+                annotationsToJavaModifiers(declaration.annotations) +
+                setOfNotNull(
+                    visibilityModifier(declaration),
+                    abstractModifierIfApplicableTo(declaration),
+                    transientModifierIfApplicableTo(declaration),
+                    volatileModifierIfApplicableTo(declaration),
+                    strictModifierIfApplicableTo(declaration),
+                    synchronizedModifierIfApplicableTo(declaration),
+                )
 
-        when (declaration.origin) {
-            Origin.JAVA -> {
-                addVisibilityModifiers()
-                if (declaration is KSClassDeclaration && declaration.classKind == ClassKind.INTERFACE)
-                    modifiers.add(Modifier.ABSTRACT)
-            }
-
-            Origin.KOTLIN -> {
-                addVisibilityModifiers()
-                if (!declaration.isOpen())
-                    modifiers.add(Modifier.FINAL)
-                (declaration as? KSClassDeclarationImpl)?.let {
-                    analyze {
-                        if (
-                            it.ktClassOrObjectSymbol.staticMemberScope
-                                .declarations.contains(declaration.ktDeclarationSymbol)
-                        )
-                            modifiers.add(Modifier.JAVA_STATIC)
-                    }
-                }
-
-                if (declaration.hasAnnotation(JVM_DEFAULT_ANNOTATION_FQN))
-                    modifiers.add(Modifier.JAVA_DEFAULT)
-                if (declaration.hasAnnotation(JVM_DEFAULT_WITHOUT_COMPATIBILITY_ANNOTATION_FQN))
-                    modifiers.add(Modifier.JAVA_DEFAULT)
-                if (declaration.hasAnnotation(JVM_STRICTFP_ANNOTATION_FQN))
-                    modifiers.add(Modifier.JAVA_STRICT)
-                if (declaration.hasAnnotation(JVM_SYNCHRONIZED_ANNOTATION_FQN))
-                    modifiers.add(Modifier.JAVA_SYNCHRONIZED)
-                if (declaration.hasAnnotation(JVM_TRANSIENT_ANNOTATION_FQN))
-                    modifiers.add(Modifier.JAVA_TRANSIENT)
-                if (declaration.hasAnnotation(JVM_VOLATILE_ANNOTATION_FQN))
-                    modifiers.add(Modifier.JAVA_VOLATILE)
-                when (declaration) {
-                    is KSClassDeclaration -> {
-                        if (declaration.isCompanionObject)
-                            modifiers.add(Modifier.JAVA_STATIC)
-                        if (declaration.classKind == ClassKind.INTERFACE)
-                            modifiers.add(Modifier.ABSTRACT)
-                    }
-
-                    is KSPropertyDeclaration -> {
-                        if (declaration.isAbstract())
-                            modifiers.add(Modifier.ABSTRACT)
-                    }
-
-                    is KSFunctionDeclaration -> {
-                        if (declaration.isAbstract)
-                            modifiers.add(Modifier.ABSTRACT)
-                    }
-                }
-            }
-
-            Origin.KOTLIN_LIB, Origin.JAVA_LIB -> {
-                if (declaration.hasAnnotation(JVM_STATIC_ANNOTATION_FQN)) {
-                    modifiers.add(Modifier.JAVA_STATIC)
-                }
-                addVisibilityModifiers()
-                when (declaration) {
-                    is KSPropertyDeclaration -> {
-                        if (declaration.jvmAccessFlag and Opcodes.ACC_TRANSIENT != 0)
-                            modifiers.add(Modifier.JAVA_TRANSIENT)
-                        if (declaration.jvmAccessFlag and Opcodes.ACC_VOLATILE != 0)
-                            modifiers.add(Modifier.JAVA_VOLATILE)
-                    }
-
-                    is KSFunctionDeclaration -> {
-                        if (declaration.jvmAccessFlag and Opcodes.ACC_STRICT != 0)
-                            modifiers.add(Modifier.JAVA_STRICT)
-                        if (declaration.jvmAccessFlag and Opcodes.ACC_SYNCHRONIZED != 0)
-                            modifiers.add(Modifier.JAVA_SYNCHRONIZED)
-                    }
-                }
-            }
-
-            else -> Unit
-        }
-        return modifiers
+        Origin.SYNTHETIC -> existingJavaModifiers(declaration)
     }
 
+    private fun existingJavaModifiers(declaration: KSDeclaration): Set<Modifier> =
+        declaration.modifiers.filter { it in javaModifiers }.toSet()
+
+    private fun visibilityModifier(declaration: KSDeclaration): Modifier? = when (declaration.getVisibility()) {
+        // TODO: getVisibility might be inlined here or simplified here.
+        // This is only needed by sources.
+        // PUBLIC, PRIVATE, PROTECTED are already handled in descriptor based impls.
+        Visibility.PUBLIC -> Modifier.PUBLIC
+        Visibility.PRIVATE -> Modifier.PRIVATE
+        Visibility.PROTECTED -> Modifier.PROTECTED
+        Visibility.INTERNAL, Visibility.LOCAL, Visibility.JAVA_PACKAGE -> null
+    }
+
+    private fun KSAnnotation.resolvesTo(fqn: String): Boolean =
+        fqn.endsWith(shortName.asString()) &&
+            annotationType.resolve().declaration.qualifiedName?.asString() == fqn
+
+    private fun toJavaModifier(annotation: KSAnnotation): Modifier? = when {
+        annotation.resolvesTo(JVM_DEFAULT_ANNOTATION_FQN) -> Modifier.JAVA_DEFAULT
+        annotation.resolvesTo(JVM_DEFAULT_WITHOUT_COMPATIBILITY_ANNOTATION_FQN) -> Modifier.JAVA_DEFAULT
+        annotation.resolvesTo(JVM_STRICTFP_ANNOTATION_FQN) -> Modifier.JAVA_STRICT
+        annotation.resolvesTo(JVM_SYNCHRONIZED_ANNOTATION_FQN) -> Modifier.JAVA_SYNCHRONIZED
+        annotation.resolvesTo(JVM_TRANSIENT_ANNOTATION_FQN) -> Modifier.JAVA_TRANSIENT
+        annotation.resolvesTo(JVM_VOLATILE_ANNOTATION_FQN) -> Modifier.JAVA_VOLATILE
+        annotation.resolvesTo(JVM_STATIC_ANNOTATION_FQN) -> Modifier.JAVA_STATIC
+        else -> null
+    }
+
+    private fun annotationsToJavaModifiers(annotations: Sequence<KSAnnotation>): Set<Modifier> =
+        annotations.fold(emptySet()) { acc, annotation ->
+            toJavaModifier(annotation)?.let { acc + it } ?: acc
+        }
+
+    private fun abstractModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration) {
+        is KSClassDeclaration if declaration.classKind == ClassKind.INTERFACE -> Modifier.ABSTRACT
+        is KSFunctionDeclaration if declaration.isAbstract -> Modifier.ABSTRACT
+        is KSPropertyDeclaration if declaration.isAbstract() -> Modifier.ABSTRACT
+        else -> null
+    }
+
+    private fun finalModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration.origin) {
+        Origin.KOTLIN if declaration !is KSBackingField && !declaration.isOpen() -> Modifier.FINAL
+        else -> null
+    }
+
+    private fun staticModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration) {
+        is KSClassDeclarationImpl -> analyze {
+            val isInStaticMemberScope = declaration.ktClassOrObjectSymbol.staticMemberScope
+                .declarations.contains(declaration.ktDeclarationSymbol)
+            if (isInStaticMemberScope)
+                Modifier.JAVA_STATIC
+            else
+                null
+        }
+
+        else -> null
+    }
+
+    private fun transientModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration) {
+        is KSPropertyDeclaration if declaration.jvmAccessFlag and Opcodes.ACC_TRANSIENT != 0 -> Modifier.JAVA_TRANSIENT
+        else -> null
+    }
+
+    private fun volatileModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration) {
+        is KSPropertyDeclaration if declaration.jvmAccessFlag and Opcodes.ACC_VOLATILE != 0 -> Modifier.JAVA_VOLATILE
+        else -> null
+    }
+
+    private fun strictModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration) {
+        is KSFunctionDeclaration if declaration.jvmAccessFlag and Opcodes.ACC_STRICT != 0 -> Modifier.JAVA_STRICT
+        else -> null
+    }
+
+    private fun synchronizedModifierIfApplicableTo(declaration: KSDeclaration): Modifier? = when (declaration) {
+        is KSFunctionDeclaration if declaration.jvmAccessFlag and Opcodes.ACC_SYNCHRONIZED != 0 -> Modifier.JAVA_SYNCHRONIZED
+        else -> null
+    }
+
+    private fun kotlinAnnotationsToModifiersIfApplicableTo(declaration: KSDeclaration): Set<Modifier> =
+        when (declaration.origin) {
+            Origin.KOTLIN -> annotationsToJavaModifiers(declaration.annotations)
+            else -> emptySet()
+        }
+
     internal val KSPropertyDeclaration.jvmAccessFlag: Int
+        // TODO: Might be a good idea to cache this result? Let's hold off until we can measure it.
         get() = when (origin) {
             Origin.KOTLIN_LIB, Origin.JAVA_LIB -> {
                 val fileManager = instance.javaFileManager
@@ -330,6 +367,7 @@ class ResolverAAImpl(
         }
 
     internal val KSFunctionDeclaration.jvmAccessFlag: Int
+        // TODO: Might be a good idea to cache this result? Let's hold off until we can measure it.
         get() = when (origin) {
             Origin.KOTLIN_LIB, Origin.JAVA_LIB -> {
                 val jvmDesc = mapToJvmSignatureInternal(this)
@@ -463,6 +501,7 @@ class ResolverAAImpl(
         }
     }
 
+    @OptIn(KaImplementationDetail::class)
     override fun getJavaWildcard(reference: KSTypeReference): KSTypeReference {
         val (ref, indexes) = reference.findOuterMostRef()
         val type = ref.resolve()
@@ -560,15 +599,22 @@ class ResolverAAImpl(
             return it
         }
 
-        if (accessor.receiver.closestClassDeclaration()?.classKind == ClassKind.ANNOTATION_CLASS) {
-            return accessor.receiver.simpleName.asString()
-        }
+        val propertyName = accessor.receiver.simpleName.asString()
+        val containingClass = accessor.receiver.closestClassDeclaration()
 
-        val name = accessor.receiver.simpleName.asString()
+        val isAnnotationClass = containingClass?.classKind == ClassKind.ANNOTATION_CLASS
+        val isJvmRecord = containingClass is KSClassDeclarationImpl &&
+            containingClass.ktClassOrObjectSymbol.isJvmRecord()
+
+        // Annotation classes and @JvmRecord data classes both use bare property names
+        // as accessor names (no get/set prefix).
+        if (isAnnotationClass || isJvmRecord) {
+            return propertyName
+        }
         // https://kotlinlang.org/docs/java-to-kotlin-interop.html#properties
         val prefixedName = when (accessor) {
-            is KSPropertyGetter -> JvmAbi.getterName(name)
-            is KSPropertySetter -> JvmAbi.setterName(name)
+            is KSPropertyGetter -> JvmAbi.getterName(propertyName)
+            is KSPropertySetter -> JvmAbi.setterName(propertyName)
             else -> ""
         }
 
@@ -603,7 +649,6 @@ class ResolverAAImpl(
         return KSNameImpl.getCached(name)
     }
 
-    // FIXME: correct implementation after incremental is ready.
     override fun getNewFiles(): Sequence<KSFile> {
         return resolutionStrategy.newKSFiles.asSequence()
     }
@@ -671,7 +716,11 @@ class ResolverAAImpl(
         }
         val realAnnotationName = expandedIfAlias ?: annotationName
 
-        return resolutionStrategy.getSymbolsWithAnnotation(realAnnotationName, inDepth)
+        return resolutionStrategy.getSymbolsWithAnnotation(
+            realAnnotationName,
+            inDepth,
+            currentApiFeatures
+        )
     }
 
     override fun getTypeArgument(typeRef: KSTypeReference, variance: Variance): KSTypeArgument {
@@ -858,6 +907,9 @@ class ResolverAAImpl(
                     }
                 }
             }
+
+            is KSBackingField if currentApiFeatures.enableBackingFields ->
+                ksAnnotated.type.resolve().toSignature()
 
             else -> null
         }

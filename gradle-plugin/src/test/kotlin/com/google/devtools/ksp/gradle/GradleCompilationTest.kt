@@ -82,6 +82,157 @@ class GradleCompilationTest(isExperimentalPsiResolution: Boolean) {
     }
 
     @Test
+    fun missingTypeReportedOnFailure() {
+        testRule.setupAppAsJvmApp()
+        testRule.appModule.dependencies.add(
+            module(configuration = "ksp", testRule.processorModule)
+        )
+        testRule.appModule.addSource(
+            "TestFailure.kt",
+            """
+            package com.example
+
+            class TestFailure {
+                val field: UnresolvedClass = UnresolvedClass()
+            }
+            """.trimIndent()
+        )
+        class ErrorReporting(private val logger: KSPLogger) : SymbolProcessor {
+            override fun process(resolver: Resolver): List<KSAnnotated> {
+                logger.error("Fatal KSP processor error!")
+                return emptyList()
+            }
+        }
+
+        class Provider : TestSymbolProcessorProvider({ env -> ErrorReporting(env.logger) })
+
+        testRule.addProvider(Provider::class)
+        val failure = testRule.runner()
+            .withArguments("app:assemble")
+            .buildAndFail()
+        assertThat(failure.output).contains("Fatal KSP processor error!")
+        assertThat(failure.output).contains("TestFailure.kt:4: Unresolved reference \'UnresolvedClass\'")
+    }
+
+    @Test
+    fun onlyLastRoundFilesAreCheckedOnFailure() {
+        testRule.setupAppAsJvmApp()
+        testRule.appModule.dependencies.add(
+            module(configuration = "ksp", testRule.processorModule)
+        )
+        testRule.appModule.addSource(
+            "Round0File.kt",
+            """
+            package com.example
+
+            class Round0File {
+                val round0Field: UnresolvedInRound0 = UnresolvedInRound0()
+            }
+            """.trimIndent()
+        )
+        class MultiRoundProcessor(
+            private val codeGenerator: CodeGenerator,
+            private val logger: KSPLogger,
+        ) : SymbolProcessor {
+            private var round = 0
+
+            override fun process(resolver: Resolver): List<KSAnnotated> {
+                if (round == 0) {
+                    round++
+                    codeGenerator.createNewFile(
+                        Dependencies.ALL_FILES,
+                        "com.example",
+                        "GeneratedInRound0"
+                    ).use { stream ->
+                        stream.writer(Charsets.UTF_8).use {
+                            it.write(
+                                """
+                                package com.example
+
+                                class GeneratedInRound0 {
+                                    val round1Field: UnresolvedInRound1 = UnresolvedInRound1()
+                                }
+                                """.trimIndent()
+                            )
+                        }
+                    }
+                } else {
+                    logger.error("Fatal KSP processor error in round 1!")
+                }
+                return emptyList()
+            }
+        }
+
+        class Provider : TestSymbolProcessorProvider({ env ->
+            MultiRoundProcessor(env.codeGenerator, env.logger)
+        })
+
+        testRule.addProvider(Provider::class)
+        val failure = testRule.runner()
+            .withArguments("app:assemble")
+            .buildAndFail()
+
+        assertThat(failure.output).contains("Fatal KSP processor error in round 1!")
+        assertThat(failure.output).contains("GeneratedInRound0.kt:4: Unresolved reference 'UnresolvedInRound1'.")
+        assertThat(failure.output).doesNotContain("UnresolvedInRound0")
+    }
+
+    @Test
+    fun missingTypeInJavaSourceReportedOnFailure() {
+        testRule.setupAppAsJvmApp()
+        testRule.appModule.dependencies.add(
+            module(configuration = "ksp", testRule.processorModule)
+        )
+        testRule.appModule.addSource(
+            "JavaTestFailure.java",
+            """
+            package com.example;
+
+            public class JavaTestFailure {
+                private final UnresolvedClass field = new UnresolvedClass();
+            }
+            """.trimIndent()
+        )
+        // Java sources resolve Kotlin declarations through light classes, they must not be
+        // reported as unresolved.
+        testRule.appModule.addSource(
+            "KotlinType.kt",
+            """
+            package com.example
+
+            class KotlinType
+            """.trimIndent()
+        )
+        testRule.appModule.addSource(
+            "JavaUsingKotlin.java",
+            """
+            package com.example;
+
+            public class JavaUsingKotlin {
+                private final KotlinType field = new KotlinType();
+            }
+            """.trimIndent()
+        )
+        class ErrorReporting(private val logger: KSPLogger) : SymbolProcessor {
+            override fun process(resolver: Resolver): List<KSAnnotated> {
+                logger.error("Fatal KSP processor error!")
+                return emptyList()
+            }
+        }
+
+        class Provider : TestSymbolProcessorProvider({ env -> ErrorReporting(env.logger) })
+
+        testRule.addProvider(Provider::class)
+        val failure = testRule.runner()
+            .withArguments("app:assemble")
+            .buildAndFail()
+
+        assertThat(failure.output).contains("Fatal KSP processor error!")
+        assertThat(failure.output).contains("e: [ksp] JavaTestFailure.java:4: Unresolved reference 'UnresolvedClass'")
+        assertThat(failure.output).doesNotContain("KotlinType")
+    }
+
+    @Test
     fun applicationCanAccessGeneratedCode_multiplatform_withConfigCache() {
         testRule.setupAppAsMultiplatformApp(
             """
@@ -95,7 +246,9 @@ class GradleCompilationTest(isExperimentalPsiResolution: Boolean) {
             """.trimIndent()
         )
         val kspConfigs =
-            """configurations.matching { it.name.startsWith("ksp") && !it.name.endsWith("ProcessorClasspath") }"""
+            """configurations.matching { 
+                |it.name.startsWith("ksp") && it.name != "ksp" && !it.name.endsWith("ProcessorClasspath") 
+                |}""".trimMargin()
         testRule.appModule.buildFileAdditions.add(
             """
                 $kspConfigs.all {
@@ -423,4 +576,104 @@ class GradleCompilationTest(isExperimentalPsiResolution: Boolean) {
             .withArguments("tasks", "-Pandroid.experimental.enableTestFixturesKotlinSupport=true")
             .build()
     }
+
+    /**
+     * Regression test for https://github.com/google/ksp/issues/3046
+     */
+    @Test
+    fun testStaleOutputCleanupWhenProcessorRemoved() {
+        testRule.setupAppAsJvmApp()
+        val processorDep = module(configuration = "ksp", testRule.processorModule)
+        testRule.appModule.dependencies.add(processorDep)
+        testRule.appModule.addSource(
+            "Foo.kt",
+            """
+            class Foo {
+                val x = ToBeGenerated()
+            }
+            """.trimIndent()
+        )
+        class MyProcessor(private val codeGenerator: CodeGenerator) : SymbolProcessor {
+            var count = 0
+            override fun process(resolver: Resolver): List<KSAnnotated> {
+                if (count == 0) {
+                    codeGenerator.createNewFile(Dependencies.ALL_FILES, "", "Generated").use {
+                        it.writer(Charsets.UTF_8).use {
+                            it.write("class ToBeGenerated")
+                        }
+                    }
+                    count += 1
+                }
+                return emptyList()
+            }
+        }
+
+        class Provider : TestSymbolProcessorProvider({ env -> MyProcessor(env.codeGenerator) })
+
+        testRule.addProvider(Provider::class)
+
+        testRule.runner().withArguments("app:assemble").build()
+
+        val generatedFile = testRule.appModule.moduleRoot.resolve("build/generated/ksp/main/kotlin/Generated.kt")
+        assertThat(generatedFile.exists()).isTrue()
+
+        // Remove KSP dependency and update source so it compiles without generated code
+        testRule.appModule.dependencies.remove(processorDep)
+        testRule.appModule.addSource("Foo.kt", "class Foo")
+
+        // Run an incremental build without clean and verify stale output directory is cleaned up
+        testRule.runner().withArguments("app:assemble").build()
+
+        assertThat(generatedFile.exists()).isFalse()
+    }
+
+    /**
+     * Regression test for https://github.com/google/ksp/issues/3050
+     */
+    @Test
+    fun testKspDebugAndroidTestKotlinExecution() {
+        testRule.setupAndroidLibraryModule(enableAgpBuiltInKotlinSupport = true)
+        testRule.appModule.buildFileAdditions.add(
+            """
+            configurations.matching { it.name == "kspAndroidTestDebug" }.all {
+                project.dependencies.add(name, project(":processor"))
+            }
+            """.trimIndent()
+        )
+        testRule.appModule.addAndroidTestSource(
+            "FooTest.kt",
+            """
+            class FooTest {
+                val x = ToBeGenerated()
+            }
+            """.trimIndent()
+        )
+        class MyProcessor(private val codeGenerator: CodeGenerator) : SymbolProcessor {
+            var processed = false
+            override fun process(resolver: Resolver): List<KSAnnotated> {
+                if (!processed) {
+                    codeGenerator.createNewFile(Dependencies.ALL_FILES, "", "Generated").use {
+                        it.writer(Charsets.UTF_8).use {
+                            it.write("class ToBeGenerated")
+                        }
+                    }
+                    processed = true
+                }
+                return emptyList()
+            }
+        }
+
+        class Provider : TestSymbolProcessorProvider({ env -> MyProcessor(env.codeGenerator) })
+
+        testRule.addProvider(Provider::class)
+
+        val result = testRule.runner().withArguments(":app:kspDebugAndroidTestKotlin", "--info").build()
+        val task = result.task(":app:kspDebugAndroidTestKotlin")
+        require(task != null)
+        require(task.outcome == TaskOutcome.SUCCESS)
+
+        val generatedFile = testRule.appModule.moduleRoot.resolve("build/generated/ksp/debugAndroidTest/kotlin/Generated.kt")
+        assertThat(generatedFile.exists()).isTrue()
+    }
 }
+

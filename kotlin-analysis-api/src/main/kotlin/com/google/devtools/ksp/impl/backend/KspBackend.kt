@@ -94,6 +94,9 @@ interface KspBackendSession {
     /** Adds the files a round generated to the module, returning their [KSFile]s. */
     fun addFiles(kotlinFiles: List<File>, javaFiles: List<File>): List<KSFile>
 
-    /** Releases what the session holds; called in a write action. */
+    /**
+     * Releases what the session holds; called once per [KspBackend.open], in a write action,
+     * after the disposable passed to [KspBackend.open] has been disposed.
+     */
     fun close()
 }

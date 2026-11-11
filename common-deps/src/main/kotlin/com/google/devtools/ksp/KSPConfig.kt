@@ -1,5 +1,23 @@
+/*
+ * Copyright 2026 Google LLC
+ * Copyright 2010-2026 JetBrains s.r.o. and Kotlin Programming Language contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.google.devtools.ksp.processing
 
+import com.google.devtools.ksp.IncrementalContextLoggingOptions
 import java.io.File
 import java.io.Serializable
 
@@ -23,7 +41,7 @@ abstract class KSPConfig(
     val resourceOutputDir: File,
 
     val incremental: Boolean,
-    val incrementalLog: Boolean,
+    val incrementalContextLoggingOptions: IncrementalContextLoggingOptions,
     val modifiedSources: List<File>,
     val removedSources: List<File>,
     val changedClasses: List<String>,
@@ -32,7 +50,6 @@ abstract class KSPConfig(
     val apiVersion: String,
 
     val allWarningsAsErrors: Boolean,
-    val mapAnnotationArgumentsInJava: Boolean,
     val experimentalPsiResolution: Boolean,
 ) : Serializable {
     abstract class Builder {
@@ -54,6 +71,13 @@ abstract class KSPConfig(
 
         var incremental: Boolean = false
         var incrementalLog: Boolean = false
+        var incrementalLogGraphOrigin: String? = null
+            set(value) {
+                field = value
+                    ?.trim()
+                    ?.filterNot(::isInvalidGraphChar)
+            }
+
         var modifiedSources: List<File> = emptyList()
         var removedSources: List<File> = emptyList()
         var changedClasses: List<String> = emptyList()
@@ -64,6 +88,22 @@ abstract class KSPConfig(
         var allWarningsAsErrors: Boolean = false
         var mapAnnotationArgumentsInJava: Boolean = false
         var experimentalPsiResolution: Boolean = false
+
+        private companion object {
+            @JvmStatic
+            fun isInvalidGraphChar(char: Char): Boolean =
+                isEscape(char) || isQuote(char) || isWhiteSpace(char)
+
+            @JvmStatic
+            fun isWhiteSpace(char: Char): Boolean =
+                char == ' ' || char == '\n' || char == '\t' || char == '\r'
+
+            @JvmStatic
+            fun isEscape(char: Char): Boolean = char == '\\'
+
+            @JvmStatic
+            fun isQuote(char: Char): Boolean = char == '\'' || char == '"'
+        }
     }
 }
 
@@ -90,7 +130,7 @@ class KSPJvmConfig(
     resourceOutputDir: File,
 
     incremental: Boolean,
-    incrementalLog: Boolean,
+    incrementalContextLoggingOptions: IncrementalContextLoggingOptions,
     modifiedSources: List<File>,
     removedSources: List<File>,
     changedClasses: List<String>,
@@ -119,7 +159,7 @@ class KSPJvmConfig(
     resourceOutputDir,
 
     incremental,
-    incrementalLog,
+    incrementalContextLoggingOptions,
     modifiedSources,
     removedSources,
     changedClasses,
@@ -128,7 +168,6 @@ class KSPJvmConfig(
     apiVersion,
 
     allWarningsAsErrors,
-    mapAnnotationArgumentsInJava,
     experimentalPsiResolution,
 ) {
     @KSPArgParserGen(name = "kspJvmArgParser")
@@ -163,7 +202,10 @@ class KSPJvmConfig(
                 resourceOutputDir,
 
                 incremental,
-                incrementalLog,
+                IncrementalContextLoggingOptions(
+                    incrementalLog,
+                    incrementalLogGraphOrigin,
+                ),
                 modifiedSources,
                 removedSources,
                 changedClasses,
@@ -198,7 +240,7 @@ class KSPNativeConfig(
     resourceOutputDir: File,
 
     incremental: Boolean,
-    incrementalLog: Boolean,
+    incrementalContextLoggingOptions: IncrementalContextLoggingOptions,
     modifiedSources: List<File>,
     removedSources: List<File>,
     changedClasses: List<String>,
@@ -227,7 +269,7 @@ class KSPNativeConfig(
     resourceOutputDir,
 
     incremental,
-    incrementalLog,
+    incrementalContextLoggingOptions,
     modifiedSources,
     removedSources,
     changedClasses,
@@ -236,7 +278,6 @@ class KSPNativeConfig(
     apiVersion,
 
     allWarningsAsErrors,
-    mapAnnotationArgumentsInJava,
     experimentalPsiResolution,
 ) {
     @KSPArgParserGen(name = "kspNativeArgParser")
@@ -262,7 +303,10 @@ class KSPNativeConfig(
                 resourceOutputDir,
 
                 incremental,
-                incrementalLog,
+                IncrementalContextLoggingOptions(
+                    incrementalLog,
+                    incrementalLogGraphOrigin,
+                ),
                 modifiedSources,
                 removedSources,
                 changedClasses,
@@ -297,7 +341,7 @@ class KSPJsConfig(
     resourceOutputDir: File,
 
     incremental: Boolean,
-    incrementalLog: Boolean,
+    incrementalContextLoggingOptions: IncrementalContextLoggingOptions,
     modifiedSources: List<File>,
     removedSources: List<File>,
     changedClasses: List<String>,
@@ -326,7 +370,7 @@ class KSPJsConfig(
     resourceOutputDir,
 
     incremental,
-    incrementalLog,
+    incrementalContextLoggingOptions,
     modifiedSources,
     removedSources,
     changedClasses,
@@ -335,7 +379,6 @@ class KSPJsConfig(
     apiVersion,
 
     allWarningsAsErrors,
-    mapAnnotationArgumentsInJava,
     experimentalPsiResolution,
 ) {
     @KSPArgParserGen(name = "kspJsArgParser")
@@ -361,7 +404,10 @@ class KSPJsConfig(
                 resourceOutputDir,
 
                 incremental,
-                incrementalLog,
+                IncrementalContextLoggingOptions(
+                    incrementalLog,
+                    incrementalLogGraphOrigin,
+                ),
                 modifiedSources,
                 removedSources,
                 changedClasses,
@@ -401,7 +447,7 @@ class KSPCommonConfig(
     resourceOutputDir: File,
 
     incremental: Boolean,
-    incrementalLog: Boolean,
+    incrementalContextLoggingOptions: IncrementalContextLoggingOptions,
     modifiedSources: List<File>,
     removedSources: List<File>,
     changedClasses: List<String>,
@@ -430,7 +476,7 @@ class KSPCommonConfig(
     resourceOutputDir,
 
     incremental,
-    incrementalLog,
+    incrementalContextLoggingOptions,
     modifiedSources,
     removedSources,
     changedClasses,
@@ -439,7 +485,6 @@ class KSPCommonConfig(
     apiVersion,
 
     allWarningsAsErrors,
-    mapAnnotationArgumentsInJava,
     experimentalPsiResolution,
 ) {
     @KSPArgParserGen(name = "kspCommonArgParser")
@@ -465,7 +510,10 @@ class KSPCommonConfig(
                 resourceOutputDir,
 
                 incremental,
-                incrementalLog,
+                IncrementalContextLoggingOptions(
+                    incrementalLog,
+                    incrementalLogGraphOrigin,
+                ),
                 modifiedSources,
                 removedSources,
                 changedClasses,

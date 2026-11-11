@@ -17,26 +17,64 @@
 
 package com.google.devtools.ksp.test
 
+import com.google.devtools.ksp.ApiFeatures
+import com.google.devtools.ksp.buildApiFeatures
 import org.jetbrains.kotlin.test.TestMetadata
 import org.junit.jupiter.api.Test
 
-class PsiConfiguredUnitTestSuite : KSPUnitTestSuite(experimentalPsiResolution = true) {
+abstract class PsiConfiguredUnitTestSuiteBase(
+    apiFeatures: ApiFeatures,
+) : KSPUnitTestSuite(experimentalPsiResolution = true, apiFeatures) {
 
-    @TestMetadata("allUseSiteTargetAppliedToAnnotationList.kt")
+    @TestMetadata("getSymbolsWithAnnotation/negative/allUseSiteTargetAppliedToAnnotationList.kt")
     @Test
     override fun testAllUseSiteTargetAppliedToAnnotationList() {
-        runTest("$AA_PATH/getSymbolsWithAnnotation/negative/allUseSiteTargetAppliedToAnnotationList.kt")
+        runKSPTest("getSymbolsWithAnnotation/negative/allUseSiteTargetAppliedToAnnotationList.kt")
     }
 
-    @TestMetadata("contextParameters.kt")
+    @TestMetadata("functionKindsJavaInheritsKotlin.kt")
     @Test
-    override fun testContextParameters() {
-        runThrowingTest("$AA_PATH/getSymbolsWithAnnotation/contextParameters.kt")
+    override fun testFunctionKindsJavaInheritsKotlin() {
+        runFailingKSPTest("functionKindsJavaInheritsKotlin.kt")
     }
 
     @TestMetadata("javaSubtypeOfKotlinInterface.kt")
     @Test
     override fun testJavaSubtypeOfKotlinInterface() {
-        runFailingTest("$AA_PATH/javaSubtypeOfKotlinInterface.kt")
+        runFailingKSPTest("javaSubtypeOfKotlinInterface.kt")
+    }
+
+    @TestMetadata("getSymbolsWithAnnotation/groupedAnnotationsWithUseSiteTargets.kt")
+    @Test
+    override fun testGroupedAnnotationsWithUseSiteTargets() {
+        runKSPTest("getSymbolsWithAnnotation/groupedAnnotationsWithUseSiteTargets.kt")
     }
 }
+
+class PsiConfiguredDefaultFeaturesUnitTestSuite : PsiConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = false
+        enableContextParameters = false
+    }
+)
+
+class PsiConfiguredBackingFieldsUnitTestSuite : PsiConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = true
+        enableContextParameters = false
+    }
+)
+
+class PsiConfiguredContextParametersUnitTestSuite : PsiConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = false
+        enableContextParameters = true
+    }
+)
+
+class PsiConfiguredAllFeaturesUnitTestSuite : PsiConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = true
+        enableContextParameters = true
+    }
+)

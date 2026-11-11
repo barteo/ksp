@@ -17,26 +17,64 @@
 
 package com.google.devtools.ksp.test
 
+import com.google.devtools.ksp.ApiFeatures
+import com.google.devtools.ksp.buildApiFeatures
 import org.jetbrains.kotlin.test.TestMetadata
 import org.junit.jupiter.api.Test
 
-class AAConfiguredUnitTestSuite : KSPUnitTestSuite(experimentalPsiResolution = false) {
+abstract class AAConfiguredUnitTestSuiteBase(
+    apiFeatures: ApiFeatures
+) : KSPUnitTestSuite(experimentalPsiResolution = false, apiFeatures) {
 
-    @TestMetadata("allUseSiteTargetAppliedToAnnotationList.kt")
+    @TestMetadata("getSymbolsWithAnnotation/negative/allUseSiteTargetAppliedToAnnotationList.kt")
     @Test
     override fun testAllUseSiteTargetAppliedToAnnotationList() {
-        runFailingTest("$AA_PATH/getSymbolsWithAnnotation/negative/allUseSiteTargetAppliedToAnnotationList.kt")
+        runFailingKSPTest("getSymbolsWithAnnotation/negative/allUseSiteTargetAppliedToAnnotationList.kt")
     }
 
-    @TestMetadata("contextParameters.kt")
+    @TestMetadata("getSymbolsWithAnnotation/groupedAnnotationsWithUseSiteTargets.kt")
     @Test
-    override fun testContextParameters() {
-        runFailingTest("$AA_PATH/getSymbolsWithAnnotation/contextParameters.kt")
+    override fun testGroupedAnnotationsWithUseSiteTargets() {
+        runKSPTest("getSymbolsWithAnnotation/groupedAnnotationsWithUseSiteTargets.kt")
+    }
+
+    @TestMetadata("functionKindsJavaInheritsKotlin.kt")
+    @Test
+    override fun testFunctionKindsJavaInheritsKotlin() {
+        runThrowingKSPTest("functionKindsJavaInheritsKotlin.kt")
     }
 
     @TestMetadata("javaSubtypeOfKotlinInterface.kt")
     @Test
     override fun testJavaSubtypeOfKotlinInterface() {
-        runTest("$AA_PATH/javaSubtypeOfKotlinInterface.kt")
+        runKSPTest("javaSubtypeOfKotlinInterface.kt")
     }
 }
+
+class AAConfiguredDefaultFeaturesUnitTestSuite : AAConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = false
+        enableContextParameters = false
+    }
+)
+
+class AAConfiguredBackingFieldsUnitTestSuite : AAConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = true
+        enableContextParameters = false
+    }
+)
+
+class AAConfiguredContextParametersUnitTestSuite : AAConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = false
+        enableContextParameters = true
+    }
+)
+
+class AAConfiguredAllFeaturesUnitTestSuite : AAConfiguredUnitTestSuiteBase(
+    buildApiFeatures {
+        enableBackingFields = true
+        enableContextParameters = true
+    }
+)

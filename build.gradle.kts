@@ -1,5 +1,4 @@
-import com.google.devtools.ksp.configureKtlint
-import com.google.devtools.ksp.configureKtlintApplyToIdea
+import com.google.devtools.ksp.configureKtfmt
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
@@ -18,17 +17,17 @@ if (!extra.has("kspVersion")) {
 }
 
 repositories {
-    mavenCentral()
     maven("https://redirector.kotlinlang.org/maven/bootstrap/")
+    mavenCentral()
 }
 
 plugins {
     kotlin("jvm")
-    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
+    alias(libs.plugins.nexus.publish)
     // Adding plugins used in multiple places to the classpath for centralized version control
-    id("com.gradleup.shadow") version "8.3.9" apply false
-    id("org.jetbrains.dokka") version "1.9.20" apply false
-    id("com.android.lint") version "8.13.0" apply false
+    alias(libs.plugins.shadow) apply false
+    alias(libs.plugins.dokka) apply false
+    alias(libs.plugins.android.lint) apply false
 }
 
 nexusPublishing {
@@ -45,16 +44,15 @@ nexusPublishing {
 
 version = rootProject.extra.get("kspVersion") as String
 
-configureKtlintApplyToIdea()
 subprojects {
     group = "com.google.devtools.ksp"
     version = rootProject.extra.get("kspVersion") as String
-    configureKtlint()
+    configureKtfmt()
     repositories {
-        mavenCentral()
         google()
         maven("https://redirector.kotlinlang.org/maven/bootstrap/")
         maven("https://www.jetbrains.com/intellij-repository/releases")
+        mavenCentral()
     }
     pluginManager.withPlugin("maven-publish") {
         val publishExtension = extensions.getByType<PublishingExtension>()

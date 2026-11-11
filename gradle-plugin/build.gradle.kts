@@ -3,11 +3,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 description = "Kotlin Symbol Processor"
 
-val kotlinBaseVersion: String by project
-val junitVersion: String by project
-val googleTruthVersion: String by project
-val agpBaseVersion: String by project
-val aaCoroutinesVersion: String? by project
 val signingKey: String? by project
 val signingPassword: String? by project
 
@@ -21,24 +16,24 @@ plugins {
 }
 
 dependencies {
-    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:$kotlinBaseVersion")
-    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinBaseVersion")
-    compileOnly("org.jetbrains.kotlin:kotlin-compiler-embeddable:$kotlinBaseVersion")
+    compileOnly(libs.kotlin.gradlePluginApi)
+    compileOnly(libs.kotlin.gradlePlugin)
+    compileOnly(libs.kotlin.compiler.embeddable)
     // replace AGP dependency w/ gradle-api when we have source registering API available.
-    compileOnly("com.android.tools.build:gradle:$agpBaseVersion")
+    compileOnly(libs.agp)
     compileOnly(gradleApi())
     compileOnly(project(":kotlin-analysis-api"))
     // Ensure stdlib version is not inconsistent due to kotlin plugin version.
-    compileOnly(kotlin("stdlib", version = kotlinBaseVersion))
+    compileOnly(libs.kotlin.stdlib)
     implementation(project(":api"))
     implementation(project(":common-deps"))
     testImplementation(gradleApi())
     testImplementation(project(":api"))
-    testImplementation("junit:junit:$junitVersion")
-    testImplementation("com.google.truth:truth:$googleTruthVersion")
+    testImplementation(libs.junit4)
+    testImplementation(libs.google.truth)
     testImplementation(gradleTestKit())
 
-    lintChecks("androidx.lint:lint-gradle:1.0.0-alpha05")
+    lintChecks(libs.androidx.lintGradle)
 }
 
 kotlin {
@@ -63,14 +58,16 @@ gradlePlugin {
     }
 }
 
-val sourcesJar = tasks.register<Jar>("sourcesJar") {
-    archiveClassifier.set("sources")
-    from(project.sourceSets.main.map { it.allSource })
-}
-val dokkaJavadocJar = tasks.register<Jar>("dokkaJavadocJar") {
-    archiveClassifier.set("javadoc")
-    from(tasks.dokkaJavadoc.flatMap { it.outputDirectory })
-}
+val sourcesJar =
+    tasks.register<Jar>("sourcesJar") {
+        archiveClassifier.set("sources")
+        from(project.sourceSets.main.map { it.allSource })
+    }
+val dokkaJavadocJar =
+    tasks.register<Jar>("dokkaJavadocJar") {
+        archiveClassifier.set("javadoc")
+        from(tasks.dokkaJavadoc.flatMap { it.outputDirectory })
+    }
 
 publishing {
     publications {
@@ -99,14 +96,19 @@ signing {
  * projects.
  */
 val testPropsOutDir = layout.buildDirectory.dir("test-config")
-val writeTestPropsTask = tasks.register<WriteProperties>("prepareTestConfiguration") {
-    description = "Generates a properties file with the current environment for gradle integration tests"
-    destinationFile = testPropsOutDir.map { it.file("testprops.properties") }
-    property("kspVersion", version)
-    property("mavenRepoDir", rootProject.layout.buildDirectory.dir("repos/test").get().asFile.absolutePath)
-    property("kspProjectRootDir", rootDir.absolutePath)
-    property("processorClasspath", project.tasks["compileTestKotlin"].outputs.files.asPath)
-}
+val writeTestPropsTask =
+    tasks.register<WriteProperties>("prepareTestConfiguration") {
+        description =
+            "Generates a properties file with the current environment for gradle integration tests"
+        destinationFile = testPropsOutDir.map { it.file("testprops.properties") }
+        property("kspVersion", version)
+        property(
+            "mavenRepoDir",
+            rootProject.layout.buildDirectory.dir("repos/test").get().asFile.absolutePath,
+        )
+        property("kspProjectRootDir", rootDir.absolutePath)
+        property("processorClasspath", project.tasks["compileTestKotlin"].outputs.files.asPath)
+    }
 
 normalization {
     runtimeClasspath {
@@ -145,31 +147,34 @@ tasks.named<Test>("test").configure {
 }
 
 abstract class WriteVersionSrcTask : DefaultTask() {
-    @get:Input
-    abstract val kspVersion: Property<String>
-    @get:Input
-    abstract val coroutinesVersion: Property<String>
+    @get:Input abstract val kspVersion: Property<String>
+    @get:Input abstract val coroutinesVersion: Property<String>
 
-    @get:OutputDirectory
-    abstract val outputSrcDir: DirectoryProperty
+    @get:OutputDirectory abstract val outputSrcDir: DirectoryProperty
 
     @TaskAction
     fun generate() {
-        outputSrcDir.file("KSPVersions.kt").get().asFile.writeText(
-            """
+        outputSrcDir
+            .file("KSPVersions.kt")
+            .get()
+            .asFile
+            .writeText(
+                """
             package com.google.devtools.ksp.gradle
             val KSP_VERSION = "${kspVersion.get()}"
             val KSP_COROUTINES_VERSION = "${coroutinesVersion.get()}"
-            """.trimIndent()
-        )
+            """
+                    .trimIndent()
+            )
     }
 }
 
-val writeVersionSrcTask = tasks.register<WriteVersionSrcTask>("generateKSPVersions") {
-    kspVersion = version.toString()
-    coroutinesVersion = aaCoroutinesVersion
-    outputSrcDir = layout.buildDirectory.dir("generated/ksp-versions")
-}
+val writeVersionSrcTask =
+    tasks.register<WriteVersionSrcTask>("generateKSPVersions") {
+        kspVersion = version.toString()
+        coroutinesVersion = libs.versions.aa.coroutines.get()
+        outputSrcDir = layout.buildDirectory.dir("generated/ksp-versions")
+    }
 
 kotlin {
     sourceSets {

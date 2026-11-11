@@ -18,34 +18,22 @@
 package com.google.devtools.ksp.processing
 
 class SymbolProcessorEnvironment(
-    /**
-     * passed from command line, Gradle, etc.
-     */
+    /** passed from command line, Gradle, etc. */
     val options: Map<String, String>,
 
-    /**
-     * language version of compilation environment.
-     */
+    /** language version of compilation environment. */
     val kotlinVersion: KotlinVersion,
 
-    /**
-     * creates managed files.
-     */
+    /** creates managed files. */
     val codeGenerator: CodeGenerator,
 
-    /**
-     * for logging to build output.
-     */
+    /** for logging to build output. */
     val logger: KSPLogger,
 
-    /**
-     * Kotlin API version of compilation environment.
-     */
+    /** Kotlin API version of compilation environment. */
     val apiVersion: KotlinVersion,
 
-    /**
-     * Kotlin compiler version of compilation environment.
-     */
+    /** Kotlin compiler version of compilation environment. */
     val compilerVersion: KotlinVersion,
 
     /**
@@ -55,17 +43,57 @@ class SymbolProcessorEnvironment(
      */
     val platforms: List<PlatformInfo>,
 
-    /**
-     * KSP version
-     */
+    /** KSP version */
     val kspVersion: KotlinVersion,
+
+    /**
+     * Processors may call this lambda to opt in to upcoming features:
+     * backing fields and context parameters.
+     *
+     * NOTE: This lambda should only be called ONCE and immediately upon creation, i.e., in the
+     * [SymbolProcessorProvider] immediately after creating the processor.
+     * Once a processor has called this lambda, it cannot unregister again.
+     */
+    @Deprecated(
+        message = "registerProcessorForNewFeatures is deprecated in favor of overriding SymbolProcessor.apiFeatures.\n" +
+            "Your SymbolProcessor should override its parent SymbolProcessor.apiFeatures property " +
+            "(e.g., using buildApiFeatures) to configure API features such as backing fields and context parameters, " +
+            "and share that property across all KSP interactions."
+    )
+    val registerProcessorForNewFeatures: (SymbolProcessor) -> Unit
 ) {
+
+    /**
+     * Secondary constructor for binary compatibility that assigns
+     * [registerProcessorForNewFeatures] a lambda without effect.
+     */
+    constructor(
+        options: Map<String, String>,
+        kotlinVersion: KotlinVersion,
+        codeGenerator: CodeGenerator,
+        logger: KSPLogger,
+        apiVersion: KotlinVersion,
+        compilerVersion: KotlinVersion,
+        platforms: List<PlatformInfo>,
+        kspVersion: KotlinVersion,
+    ) : this(
+        options,
+        kotlinVersion,
+        codeGenerator,
+        logger,
+        apiVersion,
+        compilerVersion,
+        platforms,
+        kspVersion,
+        registerProcessorForNewFeatures = { }
+    )
+
     // For compatibility with KSP 1.0.2 and earlier
     constructor(
         options: Map<String, String>,
         kotlinVersion: KotlinVersion,
         codeGenerator: CodeGenerator,
-        logger: KSPLogger
+        logger: KSPLogger,
     ) : this(
         options,
         kotlinVersion,
@@ -74,7 +102,7 @@ class SymbolProcessorEnvironment(
         kotlinVersion,
         kotlinVersion,
         emptyList(),
-        KotlinVersion(1, 0)
+        KotlinVersion(1, 0),
     )
 
     constructor(
@@ -93,6 +121,6 @@ class SymbolProcessorEnvironment(
         apiVersion,
         compilerVersion,
         platforms,
-        KotlinVersion(1, 0)
+        KotlinVersion(1, 0),
     )
 }

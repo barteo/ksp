@@ -15,8 +15,6 @@
  * limitations under the License.
  */
 
-@file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
-
 package com.google.devtools.ksp.impl.symbol.kotlin
 
 import com.google.devtools.ksp.common.KSObjectCache
@@ -33,7 +31,7 @@ import org.jetbrains.kotlin.analysis.api.types.abbreviationOrSelf
 
 class KSValueParameterImpl private constructor(
     private val ktValueParameterSymbol: KaValueParameterSymbol,
-    override val parent: KSAnnotated
+    override val parent: KSAnnotated,
 ) : KSValueParameter, Deferrable {
     companion object : KSObjectCache<KaValueParameterSymbol, KSValueParameterImpl>() {
         fun getCached(ktValueParameterSymbol: KaValueParameterSymbol, parent: KSAnnotated) =
@@ -95,7 +93,7 @@ class KSValueParameterImpl private constructor(
     }
 
     override val annotations: Sequence<KSAnnotation> by lazyMemoizedSequence {
-        ktValueParameterSymbol.annotations(this)
+        ktValueParameterSymbol.annotations(parent = this)
     }
 
     override val origin: Origin by lazy {

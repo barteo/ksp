@@ -55,7 +55,6 @@ import org.jetbrains.kotlin.fir.types.classId
 import org.jetbrains.kotlin.fir.types.isRaw
 import org.jetbrains.kotlin.fir.types.typeContext
 import org.jetbrains.kotlin.load.java.structure.JavaAnnotationArgument
-import org.jetbrains.kotlin.load.java.structure.impl.JavaUnknownAnnotationArgumentImpl
 import org.jetbrains.kotlin.load.kotlin.JvmPackagePartSource
 import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinaryClass
 import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinarySourceElement
@@ -104,21 +103,22 @@ class FirExtras : KcExtras {
 
     override fun javaAnnotationDefault(
         symbol: KaValueParameterSymbol,
-        default: JavaAnnotationArgument?,
+        default: JavaAnnotationArgument,
     ): KaAnnotationValue? = (symbol as? KaFirValueParameterSymbol)?.let {
         val firSession = it.firSymbol.fir.moduleData.session
-        val symbolBuilder = it.builder
         val expectedTypeRef = it.firSymbol.fir.returnTypeRef
-        // when no default value is declared in the class file, ideally users should
-        // apply a value for such property at use site, therefore value obtained here should not be
-        // returned. In case of a user failed to do so, we try our best to return values
-        // to ensure no annotation argument is missing from KSP side.
-        // Supplying `JavaUnknownAnnotationArgumentImpl` as the expression base
-        // will produce empty array for array type values and `null` for the rest of value types.
-        val expression = (default ?: JavaUnknownAnnotationArgumentImpl(null))
-            .toFirExpression(firSession, JavaTypeParameterStack.EMPTY, expectedTypeRef, null)
-        FirAnnotationValueConverter.toConstantValue(expression, symbolBuilder)
+        val expression = default.toFirExpression(firSession, JavaTypeParameterStack.EMPTY, expectedTypeRef, null)
+        FirAnnotationValueConverter.toConstantValue(expression, it.builder)
     }
+
+    override fun libraryAnnotationDefault(symbol: KaValueParameterSymbol): KaAnnotationValue? =
+        (symbol as? KaFirValueParameterSymbol)?.let {
+            // For libraries with metadata older than 2.2, FIR stores an expression stub instead,
+            // which does not convert to a value.
+            it.firSymbol.fir.defaultValue?.let { defaultValue ->
+                FirAnnotationValueConverter.toConstantValue(defaultValue, it.builder)
+            }
+        }
 
     override fun resolveTypes(symbol: KaSymbol) {
         (symbol as? KaFirSymbol<*>)?.firSymbol?.lazyResolveToPhase(FirResolvePhase.TYPES)

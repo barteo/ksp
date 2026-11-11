@@ -17,6 +17,9 @@
 
 package com.google.devtools.ksp.common
 
+import com.google.devtools.ksp.IncrementalContextLoggingOptions
+import com.google.devtools.ksp.buildApiFeatures
+import com.google.devtools.ksp.impl.symbol.kotlin.separateQualifierAndName
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSDeclaration
 import com.google.devtools.ksp.symbol.KSDeclarationContainer
@@ -28,11 +31,17 @@ import com.intellij.psi.PsiImportStatement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiPackage
 import com.intellij.util.containers.MultiMap
+import java.io.Closeable
 import java.io.File
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
 
-object SymbolCollector : KSDefaultVisitor<(LookupSymbolWrapper) -> Unit, Unit>() {
+object SymbolCollector : KSDefaultVisitor<(LookupSymbolWrapper) -> Unit, Unit>(
+    buildApiFeatures {
+        enableBackingFields = true
+        enableContextParameters = true
+    }
+) {
     override fun defaultHandler(node: KSNode, data: (LookupSymbolWrapper) -> Unit) = Unit
 
     override fun visitDeclaration(declaration: KSDeclaration, data: (LookupSymbolWrapper) -> Unit) {
@@ -60,7 +69,7 @@ object SymbolCollector : KSDefaultVisitor<(LookupSymbolWrapper) -> Unit, Unit>()
 @Suppress("MemberVisibilityCanBePrivate", "CanBeParameter")
 abstract class IncrementalContextBase(
     protected val anyChangesWildcard: File,
-    protected val incrementalLog: Boolean,
+    protected val loggingOptions: IncrementalContextLoggingOptions,
     protected val baseDir: File,
     protected val cachesDir: File,
     protected val kspOutputDir: File,
@@ -69,7 +78,7 @@ abstract class IncrementalContextBase(
     protected val changedClasses: List<String>,
 ) {
     // Symbols defined in changed files. This is used to update symbolsMap in the end.
-    private val updatedSymbols = MultiMap.createSet<File, LookupSymbolWrapper>()
+    protected val updatedSymbols = MultiMap.createSet<File, LookupSymbolWrapper>()
 
     // Sealed classes / interfaces on which `getSealedSubclasses` is invoked.
     // This is used to update sealedMap in the end.
@@ -91,7 +100,7 @@ abstract class IncrementalContextBase(
     }
 
     private val logsDir = File(cachesDir, "logs").apply { mkdirs() }
-    private val buildTime = Date().time
+    protected val buildTime = Date().time
 
     private val modified = knownModified.map { it.relativeTo(baseDir) }.toSet()
     private val removed = knownRemoved.map { it.relativeTo(baseDir) }.toSet()
@@ -108,7 +117,19 @@ abstract class IncrementalContextBase(
 
     private val onDemandImportsCache = ConcurrentHashMap<PsiJavaFile, List<String>>()
 
-    private fun String.toRelativeFile() = File(this).relativeTo(baseDir)
+    protected val logFiles: MutableList<Closeable> = mutableListOf()
+
+    private fun String.toRelativeFile(): File {
+        val file = File(this)
+        val absFile = if (file.isAbsolute) file else File(baseDir, this)
+        return absFile.absoluteFile.relativeTo(baseDir.absoluteFile)
+    }
+
+    private fun File.toRelativeFile(): File {
+        val absFile = if (this.isAbsolute) this else File(baseDir, this.path)
+        return absFile.absoluteFile.relativeTo(baseDir.absoluteFile)
+    }
+
     private val KSFile.relativeFile
         get() = filePath.toRelativeFile()
 
@@ -146,35 +167,35 @@ abstract class IncrementalContextBase(
     }
 
     private fun logSourceToOutputs(outputs: Set<File>, sourceToOutputs: Map<File, Set<File>>) {
-        if (!incrementalLog)
+        if (!loggingOptions.incrementalLoggingEnabled)
             return
 
-        val logFile = File(logsDir, "kspSourceToOutputs.log")
-        logFile.appendText("=== Build $buildTime ===\n")
-        logFile.appendText("Accumulated source to outputs map\n")
-        sourceToOutputsMap.keys.forEach { source ->
-            logFile.appendText("  $source:\n")
-            sourceToOutputsMap[source]!!.forEach { output ->
-                logFile.appendText("    $output\n")
+        mkLogFile("kspSourceToOutputs.log").bufferedWriter().use { logFile ->
+            logFile.write("Accumulated source to outputs map\n")
+            sourceToOutputsMap.keys.forEach { source ->
+                logFile.write("  $source:\n")
+                sourceToOutputsMap[source]!!.forEach { output ->
+                    logFile.write("    $output\n")
+                }
             }
-        }
-        logFile.appendText("\n")
+            logFile.write("\n")
 
-        logFile.appendText("Reprocessed sources and their outputs\n")
-        sourceToOutputs.forEach { (source, outputs) ->
-            logFile.appendText("  $source:\n")
+            logFile.write("Reprocessed sources and their outputs\n")
+            sourceToOutputs.forEach { (source, outputs) ->
+                logFile.write("  $source:\n")
+                outputs.forEach {
+                    logFile.write("    $it\n")
+                }
+            }
+            logFile.write("\n")
+
+            // Can be larger than the union of the above, because some outputs may have no source.
+            logFile.write("All reprocessed outputs\n")
             outputs.forEach {
-                logFile.appendText("    $it\n")
+                logFile.write("  $it\n")
             }
+            logFile.write("\n")
         }
-        logFile.appendText("\n")
-
-        // Can be larger than the union of the above, because some outputs may have no source.
-        logFile.appendText("All reprocessed outputs\n")
-        outputs.forEach {
-            logFile.appendText("  $it\n")
-        }
-        logFile.appendText("\n")
     }
 
     private fun logDirtyFiles(
@@ -185,33 +206,34 @@ abstract class IncrementalContextBase(
         dirtyFilesByNewSyms: Collection<File> = emptyList(),
         dirtyFilesBySealed: Collection<File> = emptyList(),
     ) {
-        if (!incrementalLog)
+        if (!loggingOptions.incrementalLoggingEnabled) {
             return
-
-        val logFile = File(logsDir, "kspDirtySet.log")
-        logFile.appendText("=== Build $buildTime ===\n")
-        logFile.appendText("All Files\n")
-        allFiles.forEach { logFile.appendText("  ${it.relativeFile}\n") }
-        logFile.appendText("Modified\n")
-        modified.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("Removed\n")
-        removed.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("Disappeared Outputs\n")
-        removedOutputs.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("Affected By CP\n")
-        dirtyFilesByCP.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("Affected By new syms\n")
-        dirtyFilesByNewSyms.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("Affected By sealed\n")
-        dirtyFilesBySealed.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("CP changes\n")
-        changedClasses.forEach { logFile.appendText("  $it\n") }
-        logFile.appendText("Dirty:\n")
-        files.forEach {
-            logFile.appendText("  ${it.relativeFile}\n")
         }
-        val percentage = "%.2f".format(files.size.toDouble() / allFiles.size.toDouble() * 100)
-        logFile.appendText("\nDirty / All: $percentage%\n\n")
+
+        mkLogFile("kspDirtySet.log").bufferedWriter().use { logFile ->
+            logFile.write("All Files\n")
+            allFiles.forEach { logFile.write("  ${it.relativeFile}\n") }
+            logFile.write("Modified\n")
+            modified.forEach { logFile.write("  $it\n") }
+            logFile.write("Removed\n")
+            removed.forEach { logFile.write("  $it\n") }
+            logFile.write("Disappeared Outputs\n")
+            removedOutputs.forEach { logFile.write("  $it\n") }
+            logFile.write("Affected By CP\n")
+            dirtyFilesByCP.forEach { logFile.write("  $it\n") }
+            logFile.write("Affected By new syms\n")
+            dirtyFilesByNewSyms.forEach { logFile.write("  $it\n") }
+            logFile.write("Affected By sealed\n")
+            dirtyFilesBySealed.forEach { logFile.write("  $it\n") }
+            logFile.write("CP changes\n")
+            changedClasses.forEach { logFile.write("  $it\n") }
+            logFile.write("Dirty:\n")
+            files.forEach {
+                logFile.write("  ${it.relativeFile}\n")
+            }
+            val percentage = "%.2f".format(files.size.toDouble() / allFiles.size.toDouble() * 100)
+            logFile.write("\nDirty / All: $percentage%\n\n")
+        }
     }
 
     // Beware: no side-effects here; Caches should only be touched in updateCaches.
@@ -236,18 +258,16 @@ abstract class IncrementalContextBase(
             }
         }
 
-        val dirtyFilesByNewSyms = newSyms.flatMap {
-            symbolLookupCache[it].map(::File)
+        val dirtyFilesByNewSyms = newSyms.flatMap { newSym ->
+            symbolLookupCache[newSym].map { it.toRelativeFile() }
         }
-
         val dirtyFilesBySealed = sealedMap.keys
 
         // Calculate dirty files by dirty classes in CP.
         val dirtyFilesByCP = changedClasses.flatMap { fqn ->
-            val name = fqn.substringAfterLast('.')
-            val scope = fqn.substringBeforeLast('.', "<anonymous>")
-            classLookupCache[LookupSymbolWrapper(name, scope)].map { File(it) } +
-                symbolLookupCache[LookupSymbolWrapper(name, scope)].map { File(it) }
+            val (scope, name) = separateQualifierAndName(fqn)
+            classLookupCache[LookupSymbolWrapper(name, scope)].map { it.toRelativeFile() } +
+                symbolLookupCache[LookupSymbolWrapper(name, scope)].map { it.toRelativeFile() }
         }.toSet()
 
         // output files that exist in CURR~2 but not in CURR~1
@@ -278,15 +298,17 @@ abstract class IncrementalContextBase(
 
         updateFromRemovedOutputs()
 
+        val dirtyKSFiles = ksFiles.filter { it.relativeFile in dirtyFiles }
+
         logDirtyFiles(
-            ksFiles.filter { it.relativeFile in dirtyFiles },
+            dirtyKSFiles,
             ksFiles,
             removedOutputs,
             dirtyFilesByCP,
             dirtyFilesByNewSyms,
             dirtyFilesBySealed
         )
-        return@closeFilesOnException ksFiles.filter { it.relativeFile in dirtyFiles }
+        return@closeFilesOnException dirtyKSFiles
     }
 
     // Loop detection isn't needed because of overwritten checks in CodeGeneratorImpl
@@ -322,7 +344,7 @@ abstract class IncrementalContextBase(
             sourceToOutputsMap[src] = outs.toList()
         }
 
-        logSourceToOutputs(outputs, sourceToOutputs)
+        logBeforeCacheFlush(outputs, sourceToOutputs)
 
         sourceToOutputsMap.flush()
     }
@@ -358,7 +380,11 @@ abstract class IncrementalContextBase(
         }
     }
 
-    private fun updateCaches(dirtyFiles: Collection<File>, outputs: Set<File>, sourceToOutputs: Map<File, Set<File>>) {
+    private fun updateCaches(
+        dirtyFiles: Collection<File>,
+        outputs: Set<File>,
+        sourceToOutputs: Map<File, Set<File>>
+    ) {
         // dirtyFiles may contain new files, which are unknown to sourceToOutputsMap.
         val oldOutputs = dirtyFiles.flatMap { sourceToOutputsMap[it] ?: emptyList() }.distinct()
         val removedOutputs = oldOutputs.filterNot { it in outputs }
@@ -420,6 +446,7 @@ abstract class IncrementalContextBase(
         symbolLookupCache.close()
         classLookupCache.close()
         sourceToOutputsMap.flush()
+        logFiles.forEach { it.close() }
     }
 
     // TODO: add a wildcard for outputs with no source and get rid of the outputs parameter.
@@ -446,7 +473,8 @@ abstract class IncrementalContextBase(
         // Assuming that the processors are deterministic, we are throwing away outputs from clean inputs, and
         // recovering them from the backup as a workaround for processors.
 
-        val unassociated = outputs - sourceToOutputs.values.flatten()
+        val relativeOutputs = outputs.map { it.toRelativeFile() }.toSet()
+        val unassociated = relativeOutputs - sourceToOutputs.values.flatten()
         val dirties = HashSet(unassociated)
         fun markDirty(file: File) {
             dirties.add(file)
@@ -473,7 +501,7 @@ abstract class IncrementalContextBase(
         val dirtySourceToOutputs = sourceToOutputs.filter { (src, _) ->
             isDirty(src)
         }
-        val dirtyOutputs = outputs.filter(::isDirty).toSet()
+        val dirtyOutputs = relativeOutputs.filter(::isDirty).toSet()
 
         updateCaches(dirtySources, dirtyOutputs, dirtySourceToOutputs)
 
@@ -489,14 +517,22 @@ abstract class IncrementalContextBase(
         assert(cachesUpToDateFile.exists())
     }
 
-    // Insert Java file -> names lookup records.
+    /**
+     * Insert Java file -> names lookup records.
+     * In other words, it inserts the names of symbols that may invalidate the [psiFile].
+     * There are several cases where that may happen:
+     * - If `fqn` has been looked up in the file, then `fqn` may invalidate the file
+     * (`fqn` may come from the same file or out of file).
+     * - If `sym` is a named import, then `sym` may invalidate the file.
+     * - If `sym` is an on-demand import, then `sym` may invalidate the file.
+     * - If `sym` is an implicit import, i.e., from the same package, then `sym` may invalidate the file.
+     */
     fun recordLookup(psiFile: PsiJavaFile, fqn: String) {
         if (!isIncremental)
             return
 
         val path = psiFile.virtualFile.path
-        val name = fqn.substringAfterLast('.')
-        val scope = fqn.substringBeforeLast('.', "<anonymous>")
+        val (scope, name) = separateQualifierAndName(fqn)
 
         // Java types are classes. Therefore lookups only happen in packages.
         fun record(scope: String, name: String) =
@@ -536,6 +572,21 @@ abstract class IncrementalContextBase(
             ?.let { it.substring(0, (it.length - name.length - 1).coerceAtLeast(0)) } ?: return
         updatedSealed.putValue(classDeclaration.containingFile!!.relativeFile, LookupSymbolWrapper(name, scope))
     }
+
+    protected open fun logBeforeCacheFlush(outputs: Set<File>, sourceToOutputs: Map<File, Set<File>>) {
+        logSourceToOutputs(outputs, sourceToOutputs)
+    }
+
+    protected fun mkFileInLogDir(fileName: String): File =
+        File(logsDir, fileName)
+            .also {
+                if (it.delete()) {
+                    it.createNewFile()
+                }
+            }
+
+    protected fun mkLogFile(fileName: String): File = mkFileInLogDir(fileName)
+        .also { it.appendText("=== Build $buildTime ===\n") }
 }
 
 internal class DirtinessPropagator(
@@ -574,8 +625,14 @@ internal class DirtinessPropagator(
         visitedFiles.add(file)
 
         // Propagate by dependencies
-        symbolsMap[file]?.forEach {
-            visit(it)
+        if (NoSourceFile.isSyntheticFile(file.name)) {
+            val fqn = stripSyntheticFileNameModifiers(file.name)
+            val (scope, name) = separateQualifierAndName(fqn)
+            visit(LookupSymbolWrapper(name, scope))
+        } else {
+            symbolsMap[file]?.forEach {
+                visit(it)
+            }
         }
 
         // Propagate by input-output relations

@@ -30,6 +30,7 @@ import com.google.devtools.ksp.common.impl.PsiResolutionStrategy
 import com.google.devtools.ksp.common.impl.UnknownPlatformInfoImpl
 import com.google.devtools.ksp.impl.DualLookupTracker
 import com.google.devtools.ksp.impl.ResolverAAImpl
+import com.google.devtools.ksp.impl.getPsiFilesFromPaths
 import com.google.devtools.ksp.impl.backend.KcExtras
 import com.google.devtools.ksp.impl.backend.KspBackend
 import com.google.devtools.ksp.impl.backend.KspBackendSession
@@ -43,6 +44,7 @@ import com.google.devtools.ksp.standalone.IncrementalGlobalSearchScope
 import com.google.devtools.ksp.standalone.IncrementalJavaFileManager
 import com.google.devtools.ksp.standalone.IncrementalKotlinDeclarationProviderFactory
 import com.google.devtools.ksp.standalone.IncrementalKotlinPackageProviderFactory
+import com.google.devtools.ksp.standalone.JvmDependenciesPackageIndex
 import com.google.devtools.ksp.standalone.KspStandaloneDirectInheritorsProvider
 import com.google.devtools.ksp.standalone.buildKspLibraryModule
 import com.google.devtools.ksp.standalone.buildKspSdkModule
@@ -51,15 +53,18 @@ import com.google.devtools.ksp.symbol.KSFile
 import com.google.devtools.ksp.symbol.KSNode
 import com.google.devtools.ksp.symbol.Origin
 import com.intellij.core.CoreApplicationEnvironment
+import com.intellij.diagnostic.PluginException
+import com.intellij.diagnostic.PluginProblemReporter
 import com.intellij.mock.MockProject
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runWriteAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.PackageIndex
 import com.intellij.openapi.util.Disposer
-import com.intellij.openapi.vfs.StandardFileSystems
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.impl.ZipHandler
 import com.intellij.openapi.vfs.impl.jar.CoreJarFileSystem
-import com.intellij.psi.PsiFileSystemItem
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiTreeChangeAdapter
@@ -67,7 +72,6 @@ import com.intellij.psi.PsiTreeChangeListener
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.ui.EDT
 import java.io.File
-import java.nio.file.Path
 import org.jetbrains.kotlin.analysis.api.KaExperimentalApi
 import org.jetbrains.kotlin.analysis.api.KaIdeApi
 import org.jetbrains.kotlin.analysis.api.KaImplementationDetail
@@ -80,7 +84,7 @@ import org.jetbrains.kotlin.analysis.api.platform.declarations.*
 import org.jetbrains.kotlin.analysis.api.platform.lifetime.KotlinAlwaysAccessibleLifetimeTokenFactory
 import org.jetbrains.kotlin.analysis.api.platform.lifetime.KotlinLifetimeTokenFactory
 import org.jetbrains.kotlin.analysis.api.platform.modification.KotlinModificationTrackerFactory
-import org.jetbrains.kotlin.analysis.api.platform.modification.publishGlobalModuleStateModificationEvent
+import org.jetbrains.kotlin.analysis.api.platform.modification.publishGlobalSourceModuleStateModificationEvent
 import org.jetbrains.kotlin.analysis.api.platform.packages.KotlinPackagePartProviderFactory
 import org.jetbrains.kotlin.analysis.api.platform.packages.KotlinPackageProviderFactory
 import org.jetbrains.kotlin.analysis.api.platform.permissions.KotlinAnalysisPermissionOptions
@@ -88,9 +92,7 @@ import org.jetbrains.kotlin.analysis.api.platform.resolution.KaResolutionActivit
 import org.jetbrains.kotlin.analysis.api.projectStructure.KaModule
 import org.jetbrains.kotlin.analysis.api.projectStructure.KaSourceModule
 import org.jetbrains.kotlin.analysis.api.resolve.extensions.KaResolveExtensionProvider
-import org.jetbrains.kotlin.analysis.api.session.KaSessionProvider
 import org.jetbrains.kotlin.analysis.api.standalone.KotlinStaticPackagePartProviderFactory
-import org.jetbrains.kotlin.analysis.api.standalone.StandaloneAnalysisAPISession
 import org.jetbrains.kotlin.analysis.api.standalone.base.KotlinStandalonePlatformSettings
 import org.jetbrains.kotlin.analysis.api.standalone.base.declarations.KotlinStandaloneAnnotationsResolverFactory
 import org.jetbrains.kotlin.analysis.api.standalone.base.declarations.KotlinStandaloneDeclarationProviderMerger
@@ -103,10 +105,13 @@ import org.jetbrains.kotlin.analysis.low.level.api.fir.lazy.resolve.LLFirResolut
 import org.jetbrains.kotlin.analysis.low.level.api.fir.providers.LLSealedInheritorsProvider
 import org.jetbrains.kotlin.analysis.project.structure.builder.KtModuleBuilder
 import org.jetbrains.kotlin.analysis.project.structure.builder.KtModuleProviderBuilder
+import org.jetbrains.kotlin.cli.jvm.compiler.CliMetadataFinderFactory
+import org.jetbrains.kotlin.cli.jvm.compiler.CliVirtualFileFinderFactory
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreApplicationEnvironmentMode
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreProjectEnvironment
 import org.jetbrains.kotlin.cli.jvm.compiler.setupIdeaStandaloneExecution
+import org.jetbrains.kotlin.cli.jvm.index.JvmDependenciesDynamicCompoundIndex
 import org.jetbrains.kotlin.config.ApiVersion
 import org.jetbrains.kotlin.config.JvmTarget
 import org.jetbrains.kotlin.config.KotlinCompilerVersion
@@ -116,7 +121,9 @@ import org.jetbrains.kotlin.config.LanguageVersionSettingsImpl
 import org.jetbrains.kotlin.diagnostics.KtRegisteredDiagnosticFactoriesStorage
 import org.jetbrains.kotlin.fir.declarations.SealedClassInheritorsProvider
 import org.jetbrains.kotlin.fir.session.registerResolveComponents
+import org.jetbrains.kotlin.load.kotlin.MetadataFinderFactory
 import org.jetbrains.kotlin.load.kotlin.PackagePartProvider
+import org.jetbrains.kotlin.load.kotlin.VirtualFileFinderFactory
 import org.jetbrains.kotlin.platform.CommonPlatforms
 import org.jetbrains.kotlin.platform.JsPlatform
 import org.jetbrains.kotlin.platform.TargetPlatform
@@ -134,7 +141,41 @@ class StandaloneBackend : KspBackend {
 
     override fun open(config: KSPConfig, disposable: Disposable): KspBackendSession {
         setupIdeaStandaloneExecution()
-        return StandaloneSession(config, disposable)
+        synchronized(activeExecutionsLock) {
+            activeExecutions++
+        }
+        return try {
+            StandaloneSession(config, disposable)
+        } catch (t: Throwable) {
+            endExecution(null)
+            throw t
+        }
+    }
+
+    internal companion object {
+        private val activeExecutionsLock = Any()
+        private var activeExecutions = 0
+
+        /**
+         * Ends a session opened by [open]. The application environment, and with it the jar file
+         * system, is shared by concurrent KSP executions, so its caches are only cleared when the
+         * last active execution ends.
+         */
+        fun endExecution(env: KotlinCoreProjectEnvironment?) {
+            synchronized(activeExecutionsLock) {
+                if (--activeExecutions == 0) {
+                    (env?.environment?.jarFileSystem as? CoreJarFileSystem)?.clearHandlersCache()
+                    // CoreJarFileSystem.myHandlers uses ConcurrentFactoryMap, which can construct
+                    // duplicate CoreJarHandler instances on concurrent lookups of an uncached JAR
+                    // and discard the loser via putIfAbsent. Because each CoreJarHandler opens a
+                    // ZipFile in ZipHandler's static cache (keyed by handler identity),
+                    // clearHandlersCache() only closes the winning handler. Also clear
+                    // ZipHandler's cache to close any orphaned ZipFile handles when the
+                    // application environment stays alive across runs.
+                    ZipHandler.clearFileAccessorCache()
+                }
+            }
+        }
     }
 }
 
@@ -150,14 +191,18 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
     private val psiManager: PsiManager
 
     init {
-        val (analysisAPISession, env, modules) = createAASession(kspConfig, projectDisposable)
+        val (project, env, modules) = createAASession(kspConfig, projectDisposable)
         this.env = env
         this.modules = modules
-        project = analysisAPISession.project
+        this.project = project
         psiManager = PsiManager.getInstance(project)
         // KspModuleBuilder ensures this is always a KtSourceModule
         module = modules.single() as KaSourceModule
-        javaFileManager = if (kspConfig is KSPJvmConfig) IncrementalJavaFileManager(env) else null
+        javaFileManager = if (kspConfig is KSPJvmConfig) {
+            project.getService(IncrementalJavaFileManager::class.java)
+        } else {
+            null
+        }
     }
 
     override fun sourceFiles(): List<KSFile> = prepareAllKSFiles(env, modules, javaFileManager)
@@ -173,11 +218,8 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
         )
     }
 
-    @OptIn(KaImplementationDetail::class)
     override fun dropCaches() {
-        project.publishGlobalModuleStateModificationEvent()
-        KaSessionProvider.getInstance(project).clearCaches()
-        psiManager.dropResolveCaches()
+        project.publishGlobalSourceModuleStateModificationEvent()
         psiManager.dropPsiCaches()
     }
 
@@ -185,14 +227,14 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
         prepareNewKSFiles(env, javaFileManager, kotlinFiles, javaFiles)
 
     override fun close() {
-        (env.environment.jarFileSystem as? CoreJarFileSystem)?.clearHandlersCache()
+        StandaloneBackend.endExecution(env)
     }
 
     @OptIn(KaExperimentalApi::class, KaImplementationDetail::class, KaIdeApi::class)
     private fun createAASession(
         kspConfig: KSPConfig,
         projectDisposable: Disposable,
-    ): Triple<StandaloneAnalysisAPISession, KotlinCoreProjectEnvironment, List<KaModule>> {
+    ): Triple<MockProject, KotlinCoreProjectEnvironment, List<KaModule>> {
         val kotlinCoreProjectEnvironment: KotlinCoreProjectEnvironment =
             StandaloneProjectFactory.createProjectEnvironment(
                 projectDisposable,
@@ -315,22 +357,26 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
             LLFirResolutionActivityTracker::class.java
         )
 
+        kotlinCoreProjectEnvironment.registerApplicationServices(
+            PluginProblemReporter::class.java,
+            PluginProblemReporter { message, cause, _ ->
+                PluginException(message, cause, null)
+            }::class.java
+        )
+
         registerProjectServices(
+            kspConfig,
             kotlinCoreProjectEnvironment,
             ktFiles,
             createPackagePartProvider,
+            libraryRoots.map { it.file }.distinct(),
         )
 
         CoreApplicationEnvironment.registerExtensionPoint(
             project.extensionArea, PsiTreeChangeListener.EP.name, PsiTreeChangeAdapter::class.java
         )
         return Triple(
-            StandaloneAnalysisAPISession(kotlinCoreProjectEnvironment) {
-                // This is only used by kapt4, which should query a provider, instead of have it passed here IMHO.
-                // kapt4's implementation is static, which may or may not work for us depending on future use cases.
-                // Let's implement it later if necessary.
-                TODO("Not implemented yet.")
-            },
+            kotlinCoreProjectEnvironment.project,
             kotlinCoreProjectEnvironment,
             modules
         )
@@ -352,9 +398,11 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
 
     // TODO: org.jetbrains.kotlin.analysis.providers.impl.KotlinStatic*
     private fun registerProjectServices(
+        kspConfig: KSPConfig,
         kotlinCoreProjectEnvironment: KotlinCoreProjectEnvironment,
         ktFiles: List<KtFile>,
         packagePartProvider: (GlobalSearchScope) -> PackagePartProvider,
+        libraryRoots: List<VirtualFile> = emptyList(),
     ) {
         val project = kotlinCoreProjectEnvironment.project
         project.apply {
@@ -395,7 +443,12 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
                 KotlinDeclarationProviderMerger::class.java,
                 KotlinStandaloneDeclarationProviderMerger(this)
             )
-            registerService(KotlinPackageProviderFactory::class.java, IncrementalKotlinPackageProviderFactory(project))
+            // Package provider factory requires binary library roots to discover packages
+            // declared in precompiled KLIBs (e.g. for Kotlin/Native and JS/Wasm targets).
+            registerService(
+                KotlinPackageProviderFactory::class.java,
+                IncrementalKotlinPackageProviderFactory(project, libraryRoots)
+            )
 
             registerService(
                 SealedClassInheritorsProvider::class.java,
@@ -414,6 +467,26 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
             // replace KaFirStopWorldCacheCleaner with no op implementation
             @OptIn(KaImplementationDetail::class)
             registerService(KaFirCacheCleaner::class.java, NoOpCacheCleaner::class.java)
+
+            if (kspConfig is KSPJvmConfig) {
+                val rootsIndex = JvmDependenciesDynamicCompoundIndex(true)
+                val fileFinderFactory = CliVirtualFileFinderFactory(rootsIndex, false, null)
+                // VirtualFileFinderFactory, MetadataFinderFactory, and PackageIndex are already
+                // registered during project environment creation with separate indices, so we use
+                // replaceService to point them at our own custom rootsIndex. Replacing them here is
+                // safe because consumers look up these services lazily when analysis begins in
+                // execute(), and all classpath/source roots are indexed in rootsIndex.
+                replaceService(VirtualFileFinderFactory::class.java, fileFinderFactory)
+                replaceService(
+                    MetadataFinderFactory::class.java,
+                    CliMetadataFinderFactory(fileFinderFactory)
+                )
+                replaceService(PackageIndex::class.java, JvmDependenciesPackageIndex(rootsIndex))
+                registerService(
+                    IncrementalJavaFileManager::class.java,
+                    IncrementalJavaFileManager(kotlinCoreProjectEnvironment, rootsIndex)
+                )
+            }
         }
     }
 
@@ -426,11 +499,11 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
         val project = kotlinCoreProjectEnvironment.project
         val ktFiles = mutableSetOf<KtFile>()
         val javaFiles = mutableSetOf<PsiJavaFile>()
-        modules.filterIsInstance<KaSourceModule>().forEach {
-            it.psiRoots.forEach {
-                when (it) {
-                    is KtFile -> ktFiles.add(it)
-                    is PsiJavaFile -> if (javaFileManager != null) javaFiles.add(it)
+        modules.filterIsInstance<KaSourceModule>().forEach { kaSourceModule ->
+            kaSourceModule.psiRoots.forEach { psiRoot ->
+                when (psiRoot) {
+                    is KtFile -> ktFiles.add(psiRoot)
+                    is PsiJavaFile -> if (javaFileManager != null) javaFiles.add(psiRoot)
                 }
             }
         }
@@ -496,25 +569,6 @@ private class StandaloneSession(kspConfig: KSPConfig, projectDisposable: Disposa
     }
 }
 
-private inline fun <reified T : PsiFileSystemItem> getPsiFilesFromPaths(
-    project: Project,
-    paths: Set<Path>,
-): List<T> {
-    val fs = StandardFileSystems.local()
-    val psiManager = PsiManager.getInstance(project)
-    return buildList {
-        for (path in paths) {
-            val vFile = fs.findFileByPath(path.toString()) ?: continue
-            val psiFileSystemItem =
-                if (vFile.isDirectory)
-                    psiManager.findDirectory(vFile) as? T
-                else
-                    psiManager.findFile(vFile) as? T
-            psiFileSystemItem?.let { add(it) }
-        }
-    }
-}
-
 /*
 * NoOp implementation of the KaFirCacheCleaner
 *
@@ -526,4 +580,12 @@ class NoOpCacheCleaner : KaFirCacheCleaner {
     override fun enterAnalysis() {}
     override fun exitAnalysis() {}
     override fun scheduleCleanup() {}
+}
+
+private fun <T : Any> MockProject.replaceService(
+    serviceInterface: Class<T>,
+    serviceImplementation: T,
+) {
+    picoContainer.unregisterComponent(serviceInterface.name)
+    registerService(serviceInterface, serviceImplementation)
 }

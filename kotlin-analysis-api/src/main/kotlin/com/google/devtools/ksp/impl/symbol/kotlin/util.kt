@@ -25,6 +25,7 @@ import com.google.devtools.ksp.containingFile
 import com.google.devtools.ksp.impl.KSPCoreEnvironment
 import com.google.devtools.ksp.impl.ResolverAAImpl
 import com.google.devtools.ksp.impl.backend.KcExtras
+import com.google.devtools.ksp.impl.recordClassReferenceLookup
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSAnnotationResolvedImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSClassifierParameterImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.resolved.KSClassifierReferenceResolvedImpl
@@ -71,11 +72,13 @@ import org.jetbrains.kotlin.analysis.api.impl.base.types.KaBaseTypeArgumentWithV
 import org.jetbrains.kotlin.analysis.api.platform.lifetime.KotlinAlwaysAccessibleLifetimeToken
 import org.jetbrains.kotlin.analysis.api.projectStructure.KaLibraryModule
 import org.jetbrains.kotlin.analysis.api.projectStructure.KaSourceModule
+import org.jetbrains.kotlin.analysis.api.symbols.KaBackingFieldSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaCallableSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaClassKind
 import org.jetbrains.kotlin.analysis.api.symbols.KaClassLikeSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaClassSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaClassifierSymbol
+import org.jetbrains.kotlin.analysis.api.symbols.KaContextParameterSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaDeclarationSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaEnumEntrySymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KaFileSymbol
@@ -115,7 +118,6 @@ import org.jetbrains.kotlin.analysis.api.types.KaTypeProjection
 import org.jetbrains.kotlin.analysis.api.types.KaUsualClassType
 import org.jetbrains.kotlin.analysis.api.types.symbol
 import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap
-import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap.mapJavaToKotlin
 import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap.mapKotlinToJava
 import org.jetbrains.kotlin.codegen.state.InfoForMangling
 import org.jetbrains.kotlin.codegen.state.collectFunctionSignatureForManglingSuffix
@@ -126,8 +128,10 @@ import org.jetbrains.kotlin.metadata.jvm.deserialization.JvmProtoBufUtil
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.ClassIdBasedLocality
 import org.jetbrains.kotlin.name.FqNameUnsafe
+import org.jetbrains.kotlin.name.JvmStandardClassIds
 import org.jetbrains.kotlin.name.JvmStandardClassIds.JVM_SUPPRESS_WILDCARDS_ANNOTATION_FQ_NAME
 import org.jetbrains.kotlin.name.JvmStandardClassIds.JVM_WILDCARD_ANNOTATION_FQ_NAME
+import org.jetbrains.kotlin.name.NameUtils
 import org.jetbrains.kotlin.psi.KtAnnotated
 import org.jetbrains.kotlin.psi.KtElement
 import org.jetbrains.kotlin.psi.KtParameter
@@ -457,8 +461,10 @@ internal fun KaSymbol.getContainingKSSymbol(): KSDeclaration? {
 internal fun KaSymbol.toKSDeclaration(): KSDeclaration? = toKSAnnotated() as? KSDeclaration
 
 // For efficiency & simplicity, KaDestructuringDeclarationSymbol is handled by caller.
+@OptIn(KaExperimentalApi::class)
 internal fun KaSymbol.toKSAnnotated(): KSAnnotated = when (this) {
     is KaPropertySymbol -> toKSPropertyDeclaration()
+    is KaBackingFieldSymbol -> toKSBackingField()
     is KaNamedClassSymbol -> toKSClassDeclaration()
     is KaFunctionSymbol -> toKSFunctionDeclaration()
     is KaTypeAliasSymbol -> toKSTypeAlias()
@@ -468,6 +474,7 @@ internal fun KaSymbol.toKSAnnotated(): KSAnnotated = when (this) {
     is KaTypeParameterSymbol -> toKSTypeParameter()
     is KaLocalVariableSymbol -> toKSPropertyDeclarationLocalVariable()
     is KaValueParameterSymbol -> toKSValueParameter()
+    is KaContextParameterSymbol -> toKSContextParameter()
     else -> throw InternalKSPException(
         "Unexpected class for KtSymbol",
         this.psi.toLocation(),
@@ -477,6 +484,21 @@ internal fun KaSymbol.toKSAnnotated(): KSAnnotated = when (this) {
 
 internal fun KaPropertySymbol.toKSPropertyDeclaration(): KSPropertyDeclarationImpl =
     KSPropertyDeclarationImpl.getCached(this)
+
+internal fun KaBackingFieldSymbol.toKSBackingField(): KSBackingFieldImpl =
+    KSBackingFieldImpl.getCached(this)
+
+internal fun KaJavaFieldSymbol.toKSPropertyDeclaration(): KSPropertyDeclarationJavaImpl =
+    KSPropertyDeclarationJavaImpl.getCached(this)
+
+internal fun KaJavaFieldSymbol.toKSBackingField(
+    property: KSPropertyDeclarationJavaImpl? = null
+): KSBackingFieldJavaImpl =
+    if (property == null) {
+        KSBackingFieldJavaImpl.getCached(this to this.toKSPropertyDeclaration())
+    } else {
+        KSBackingFieldJavaImpl.getCached(this to property)
+    }
 
 internal fun KaNamedClassSymbol.toKSClassDeclaration(): KSClassDeclarationImpl =
     KSClassDeclarationImpl.getCached(this)
@@ -489,16 +511,21 @@ internal fun KaCallableSymbol.toKSFunctionDeclaration(): KSFunctionDeclarationIm
     else -> null
 }
 
-internal fun KaCallableSymbol.toKSPropertyDeclaration(): KSPropertyDeclaration? = when (this) {
+internal fun KaCallableSymbol.toKSPropertyDeclaration(): KSPropertyDeclarationJavaImpl? = when (this) {
     is KaJavaFieldSymbol -> this.toKSPropertyDeclaration()
     else -> null
 }
 
+internal fun KaCallableSymbol.toKSBackingField(
+    property: KSPropertyDeclarationJavaImpl? = null
+): KSBackingFieldJavaImpl? =
+    when (this) {
+        is KaJavaFieldSymbol -> this.toKSBackingField(property)
+        else -> null
+    }
+
 internal fun KaTypeAliasSymbol.toKSTypeAlias(): KSTypeAliasImpl =
     KSTypeAliasImpl.getCached(this)
-
-internal fun KaJavaFieldSymbol.toKSPropertyDeclaration(): KSPropertyDeclaration =
-    KSPropertyDeclarationJavaImpl.getCached(this)
 
 internal fun KaFileSymbol.toKSFile(): KSFileImpl =
     KSFileImpl.getCached(this)
@@ -514,6 +541,18 @@ internal fun KaLocalVariableSymbol.toKSPropertyDeclarationLocalVariable(): KSPro
 
 internal fun KaValueParameterSymbol.toKSValueParameter(): KSValueParameterImpl =
     KSValueParameterImpl.getCached(this, this.getContainingKSSymbol()!!)
+
+@OptIn(KaExperimentalApi::class)
+internal fun KaContextParameterSymbol.toKSContextParameter(): KSContextParameterImpl =
+    KSContextParameterImpl.getCached(
+        kaContextParameterSymbol = this,
+        parent = this.getContainingKSSymbol()
+            ?: throw InternalKSPException(
+                message = "Unexpected null containingKSSymbol for context parameter ${name.asString()}",
+                location = psi.toLocation(),
+                originatingClass = javaClass
+            )
+    )
 
 internal fun AnnotationUseSiteTargetAA.toKSAnnotationUseSiteTarget(): AnnotationUseSiteTarget = when (this) {
     AnnotationUseSiteTargetAA.ALL -> AnnotationUseSiteTarget.ALL
@@ -716,6 +755,19 @@ internal inline fun <reified T : KSNode> KSNode.findParentOfType(): KSNode? {
     return result
 }
 
+/**
+ * Find the closest enclosing [KSDeclaration] of a [KSNode], or self if this node is already a [KSDeclaration].
+ *
+ * @return The enclosing [KSDeclaration], or `null` if no enclosing declaration exists.
+ */
+internal fun KSNode.findParentDeclaration(): KSDeclaration? {
+    var current: KSNode? = this
+    while (current != null && current !is KSDeclaration) {
+        current = current.parent
+    }
+    return current
+}
+
 internal fun KaAnnotationValue.toValue(parent: KSNode? = null, origin: Origin? = null): Any? = when (this) {
     is KaAnnotationValue.ArrayValue -> this.values.map { it.toValue(parent, origin) }
     is KaAnnotationValue.NestedAnnotationValue -> KSAnnotationResolvedImpl.getCached(this.annotation, parent, origin)
@@ -731,48 +783,53 @@ internal fun KaAnnotationValue.toValue(parent: KSNode? = null, origin: Origin? =
     } ?: KSErrorType
 
     is KaAnnotationValue.ClassLiteralValue -> {
-        KSTypeImpl.getCached(this@toValue.type)
+        parent?.findParentDeclaration()?.let { decl ->
+            recordClassReferenceLookup(type, decl)
+        }
+        KSTypeImpl.getCached(type)
     }
 
     is KaAnnotationValue.ConstantValue -> this.value.value
     is KaAnnotationValue.UnsupportedValue -> null
 }
 
-@OptIn(KaImplementationDetail::class, KaExperimentalApi::class)
-internal fun KaValueParameterSymbol.getDefaultValue(): KaAnnotationValue? {
-    return this.psi.let { psiElement ->
-        when (psiElement) {
-            is KtParameter -> analyze {
-                psiElement.defaultValue?.evaluateAsAnnotationValue()
-            }
-            // ClsMethodImpl means the psi is decompiled psi.
-            null, is ClsMemberImpl<*> -> {
-                // TODO: multiplatform
-                if (!ResolverAAImpl.instance.isJvm)
-                    return@let null
-                val fileManager = ResolverAAImpl.instance.javaFileManager
-                val parentClass = this.getContainingKSSymbol()!!.findParentOfType<KSClassDeclaration>()
-                val classId = (parentClass as KSClassDeclarationImpl).ktClassOrObjectSymbol.classId
-                    ?: return@let null
+private fun KaValueParameterSymbol.getDefaultValueOnJvm(): KaAnnotationValue? {
+    val fileManager = ResolverAAImpl.instance.javaFileManager
+    // The containing declaration of an annotation parameter is the annotation's constructor.
+    val parentClass = this.getContainingKSSymbol()?.findParentOfType<KSClassDeclaration>()
+    val classId = (parentClass as? KSClassDeclarationImpl)?.ktClassOrObjectSymbol?.classId
+        ?: return null
 
-                val defaultValue: JavaAnnotationArgument? = analyze {
-                    val jc = fileManager.findClass(classId, analysisScope) ?: return@analyze null
-                    jc.methods.firstOrNull { it.name == name }?.annotationParameterDefaultValue
-                }
+    val defaultValue: JavaAnnotationArgument = analyze {
+        val jc = fileManager.findClass(classId, analysisScope) ?: return@analyze null
+        jc.methods.firstOrNull { it.name == name }?.annotationParameterDefaultValue
+    } ?: return null
 
-                // When the class file declares no default value, users should supply one at
-                // the use site; KcExtras still returns a best-effort value (an empty array or
-                // null) so that no annotation argument goes missing on the KSP side.
-                KcExtras.instance.javaAnnotationDefault(this, defaultValue)
-            }
+    return KcExtras.instance.javaAnnotationDefault(this, defaultValue)
+}
 
-            else -> throw InternalKSPException(
-                "Unhandled default value type",
-                psiElement.toLocation(),
-                psiElement.javaClass,
-            )
+@OptIn(KaExperimentalApi::class)
+internal fun KaValueParameterSymbol.getDefaultValue(): KaAnnotationValue? = when (val psi = this.psi) {
+    is KtParameter -> analyze {
+        psi.defaultValue?.evaluateAsAnnotationValue()
+    }
+
+    // A null psi or a decompiled psi (ClsMemberImpl) means the declaration comes from a binary dependency.
+    null, is ClsMemberImpl<*> -> {
+        if (ResolverAAImpl.instance.isJvm) {
+            // On JVM the default value is read from the `AnnotationDefault` attribute of the class file.
+            getDefaultValueOnJvm()
+        } else {
+            // Other platforms have no class files to read from, so rely on what the KLib metadata provided.
+            KcExtras.instance.libraryAnnotationDefault(this)
         }
     }
+
+    else -> throw InternalKSPException(
+        "Unhandled default value type",
+        psi.toLocation(),
+        psi.javaClass,
+    )
 }
 
 @OptIn(KaExperimentalApi::class)
@@ -1139,6 +1196,19 @@ internal fun KaCallableSymbol.explictJvmName(): String? {
     }?.arguments?.single()?.expression?.toValue() as? String
 }
 
+private val javaLangRecordClassId = ClassId.fromString("java/lang/Record")
+
+internal fun KaClassSymbol.isJvmRecord(): Boolean {
+    if (annotations.any { it.classId == JvmStandardClassIds.Annotations.JvmRecord }) {
+        return true
+    }
+    // The @JvmRecord annotation is not retained in class files, so compiled record
+    // classes are recognized by their java.lang.Record supertype instead.
+    return origin == KaSymbolOrigin.LIBRARY && analyze {
+        superTypes.any { (it as? KaClassType)?.classId == javaLangRecordClassId }
+    }
+}
+
 internal val KaDeclarationSymbol.internalSuffix: String
     get() = analyze {
         if (visibility != KaSymbolVisibility.INTERNAL)
@@ -1159,7 +1229,7 @@ internal val KaDeclarationSymbol.internalSuffix: String
             else -> {}
         }
 
-        fun String.toSuffix(): String = "\$$this".replace('.', '_').replace('-', '_')
+        fun String.toSuffix(): String = "\$${NameUtils.sanitizeAsJavaIdentifier(this)}"
         when (val module = containingModule) {
             is KaSourceModule -> module.name.toSuffix()
             is KaLibraryModule -> {
@@ -1295,3 +1365,14 @@ private fun isKotlinAlteredType(fqName: String): Boolean {
 // Annotations on deeply synthesized members like getter of Java annotation arguments can be defined in src.
 internal val KSNode.definitionOrigin: Origin
     get() = containingFile?.origin ?: origin
+
+/**
+ * Returns the qualifier and name of [fqn].
+ *
+ * E.g., if `fqn = a.b.c.f`, then it returns `a.b.c, f`.
+ */
+internal fun separateQualifierAndName(fqn: String): Pair<String, String> {
+    val scope = fqn.substringBeforeLast('.', "<anonymous>")
+    val name = fqn.substringAfterLast('.')
+    return scope to name
+}

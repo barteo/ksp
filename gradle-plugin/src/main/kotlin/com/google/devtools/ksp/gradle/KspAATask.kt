@@ -22,6 +22,8 @@ import com.google.devtools.ksp.gradle.utils.allKotlinSourceSetsObservable
 import com.google.devtools.ksp.gradle.utils.canUseGeneratedKotlinApi
 import com.google.devtools.ksp.gradle.utils.enableProjectIsolationCompatibleCodepath
 import com.google.devtools.ksp.gradle.utils.isAgpBuiltInKotlinUsed
+import com.google.devtools.ksp.gradle.utils.isLegacyKaptPluginApplied
+import com.google.devtools.ksp.gradle.utils.kotlinSourceSetsObservable
 import com.google.devtools.ksp.impl.KotlinSymbolProcessing
 import com.google.devtools.ksp.processing.ExitCode
 import com.google.devtools.ksp.processing.KSPCommonConfig
@@ -35,14 +37,17 @@ import org.gradle.api.JavaVersion
 import org.gradle.api.Project
 import org.gradle.api.artifacts.Configuration
 import org.gradle.api.attributes.Attribute
+import org.gradle.api.attributes.Usage
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileCollection
 import org.gradle.api.logging.LogLevel
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.provider.Provider
 import org.gradle.api.provider.SetProperty
+import org.gradle.api.services.ServiceReference
 import org.gradle.api.tasks.CacheableTask
 import org.gradle.api.tasks.Classpath
 import org.gradle.api.tasks.IgnoreEmptyDirectories
@@ -75,7 +80,6 @@ import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinCommonCompilation
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinJvmAndroidCompilation
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeCompilation
 import org.jetbrains.kotlin.gradle.tasks.AbstractKotlinCompileTool
-import org.jetbrains.kotlin.gradle.tasks.KotlinNativeCompile
 import org.jetbrains.kotlin.konan.target.HostManager
 import org.jetbrains.kotlin.tooling.core.KotlinToolingVersion
 import java.io.ByteArrayOutputStream
@@ -101,8 +105,24 @@ abstract class KspAATask @Inject constructor(
     @get:Nested
     abstract val commandLineArgumentProviders: ListProperty<CommandLineArgumentProvider>
 
+    // Metadata JSONs from dependencies indicating cross-compilation support.
+    // Declared as input so Gradle runs the exporting tasks before this task executes.
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    @get:Optional
+    abstract val crossCompilationMetadata: ConfigurableFileCollection
+
+    @get:ServiceReference
+    abstract val isolatedClassLoaderCacheBuildService: Property<IsolatedClassLoaderCacheBuildService>
+
     @TaskAction
     fun execute(inputChanges: InputChanges) {
+        if (kspConfig.processorClasspath.isEmpty) {
+            kspConfig.outputBaseDir.get().asFile.deleteRecursively()
+            kspConfig.cachesDir.get().asFile.deleteRecursively()
+            return
+        }
+
         // FIXME: Create a class loader with clean classpath instead of shadowing existing ones. It'll require either:
         //  1. passing arguments by data structures in stdlib, or
         //  2. hoisting and publishing KspGradleConfig into another package.
@@ -142,6 +162,7 @@ abstract class KspAATask @Inject constructor(
                         kspConfig.processorClasspath,
                     )
                 }
+
                 else -> {
                     if (
                         !inputChanges.isIncremental ||
@@ -158,11 +179,10 @@ abstract class KspAATask @Inject constructor(
 
         val workerQueue = workerExecutor.noIsolation()
         workerQueue.submit(KspAAWorkerAction::class.java) {
-            it.config = kspConfig
-            it.kspClasspath = kspClasspath
+            it.config.set(kspConfig)
+            it.kspClasspath.from(kspClasspath)
             it.modifiedSources = modifiedSources
             it.removedSources = removedSources
-            it.isInputChangeIncremental = inputChanges.isIncremental
             it.changedClasses = changedClasses
         }
     }
@@ -176,6 +196,11 @@ abstract class KspAATask @Inject constructor(
             kspExtension: KspExtension,
         ): TaskProvider<KspAATask> {
             val project = kotlinCompilation.target.project
+            val isolatedClassLoaderCacheBuildServiceProvider = project.gradle.sharedServices.registerIfAbsent(
+                IsolatedClassLoaderCacheBuildService.KEY,
+                IsolatedClassLoaderCacheBuildService::class.java
+            ) {}
+
             val target = kotlinCompilation.target.name
             val sourceSetName = kotlinCompilation.defaultSourceSet.name
             val kspTaskName = kotlinCompileProvider.name.replaceFirst("compile", "ksp")
@@ -196,9 +221,8 @@ abstract class KspAATask @Inject constructor(
             }
             val incomingProcessors = processorClasspath.incoming.artifactView { }.files
             val kspTaskProvider = project.tasks.register(kspTaskName, KspAATask::class.java) { kspAATask ->
-                kspAATask.onlyIf {
-                    !incomingProcessors.isEmpty
-                }
+                kspAATask.usesService(isolatedClassLoaderCacheBuildServiceProvider)
+                kspAATask.isolatedClassLoaderCacheBuildService.set(isolatedClassLoaderCacheBuildServiceProvider)
                 kspAATask.kspClasspath.from(kspAADepCfg.incoming.artifactView { }.files)
                 kspAATask.kspConfig.let { cfg ->
                     cfg.processorClasspath.from(incomingProcessors)
@@ -207,18 +231,38 @@ abstract class KspAATask @Inject constructor(
                     val filteredTasks = if (kspExtension.excludedSources.isEmpty.not()) {
                         kspExtension.excludedSources.buildDependencies.getDependencies(null).map { it.name }
                     } else emptyList()
-                    kotlinCompilation.allKotlinSourceSetsObservable.forAll { sourceSet ->
+                    // Opt-in: metadata compilations process only their own source sets, matching the
+                    // compiler; upstream stays resolvable via its klib on `cfg.libraries`. Without it,
+                    // an intermediate compilation regenerates its upstream's output (#2814).
+                    val ownSourcesOnly = project.providers
+                        .gradleProperty("ksp.experimental.metadata.own.sources.only")
+                        .map { it.toBoolean() }
+                        .getOrElse(false)
+                    val sourceSetsToProcess = if (ownSourcesOnly && kotlinCompilation is KotlinCommonCompilation) {
+                        kotlinCompilation.kotlinSourceSetsObservable
+                    } else {
+                        kotlinCompilation.allKotlinSourceSetsObservable
+                    }
+                    sourceSetsToProcess.forAll { sourceSet ->
                         val filtered = kotlinOutputDir.zip(javaOutputDir) { kotlinOut, javaOut ->
                             sourceSet.kotlin.srcDirs.filter {
                                 !kotlinOut.asFile.isParentOf(it) && !javaOut.asFile.isParentOf(it) &&
                                     it !in kspExtension.excludedSources
-                            }.map {
+                            }.map { srcDir ->
                                 // @SkipWhenEmpty doesn't work well with File.
-                                project.objects.fileTree().from(it)
+                                // Filter to only include Kotlin/Java sources so that Gradle can correctly
+                                // skip the task as NO-SOURCE if the directories contain only non-source files.
+                                project.objects.fileTree().from(srcDir).matching {
+                                    it.include("**/*.kt", "**/*.kts", "**/*.java")
+                                }
                             }
                         }
                         cfg.sourceRoots.from(filtered)
                         cfg.javaSourceRoots.from(filtered)
+                    }
+                    // Dependencies span the full closure even when only a subset is processed:
+                    // upstream must be compiled first so its klib exists.
+                    kotlinCompilation.allKotlinSourceSetsObservable.forAll { sourceSet ->
                         if (project.canUseGeneratedKotlinApi() && project.enableProjectIsolationCompatibleCodepath()) {
                             kspAATask.dependsOn(sourceSet.kotlin.buildDependencies)
                         } else {
@@ -233,22 +277,28 @@ abstract class KspAATask @Inject constructor(
 
                     if (kotlinCompilation is KotlinJvmAndroidCompilation) {
                         if (project.isAgpBuiltInKotlinUsed()) {
-                            // when legacy-kapt plugin is applied, we can't use KotlinCompile.libraries directly
-                            // because it contains the kapt output classes dir leading to circular dependency
-                            val androidComponents = project.extensions.getByType(AndroidComponentsExtension::class.java)
-                            cfg.libraries.from(androidComponents.sdkComponents.bootClasspath)
-                            cfg.libraries.from(
-                                project.provider {
-                                    val configuration = project.configurations.getByName(
-                                        kotlinCompilation.compileDependencyConfigurationName
-                                    )
-                                    configuration.incoming.artifactView { config ->
-                                        config.attributes.attribute(
-                                            Attribute.of("artifactType", String::class.java), "android-classes-jar"
+                            val androidComponents =
+                                project.extensions.getByType(AndroidComponentsExtension::class.java)
+
+                            if (project.isLegacyKaptPluginApplied()) {
+                                // Fallback to workaround to avoid circular dependency with KAPT.
+                                cfg.libraries.from(androidComponents.sdkComponents.bootClasspath)
+                                cfg.libraries.from(
+                                    project.provider {
+                                        val configuration = project.configurations.getByName(
+                                            kotlinCompilation.compileDependencyConfigurationName
                                         )
-                                    }.files
-                                }
-                            )
+                                        configuration.incoming.artifactView { config ->
+                                            config.attributes.attribute(
+                                                Attribute.of("artifactType", String::class.java), "android-classes-jar"
+                                            )
+                                        }.files
+                                    }
+                                )
+                            } else {
+                                cfg.libraries.from(kotlinCompileProvider.get().libraries)
+                                cfg.libraries.from(androidComponents.sdkComponents.bootClasspath)
+                            }
                         } else {
                             val kaptGeneratedClassesDir = getKaptGeneratedClassesDir(project, sourceSetName)
                             val kspOutputDir = KspGradleSubplugin.getKspOutputDir(project, sourceSetName, target)
@@ -344,6 +394,10 @@ abstract class KspAATask @Inject constructor(
                             .map { it.toBoolean() }
                             .orElse(false)
                     )
+                    cfg.incrementalGraphOrigin.value(
+                        project.providers
+                            .gradleProperty("ksp.incremental.log.graph.origin")
+                    )
 
                     cfg.experimentalPsiResolution.value(
                         project.providers
@@ -418,25 +472,26 @@ abstract class KspAATask @Inject constructor(
                     if (kotlinCompilation is KotlinNativeCompilation) {
                         val konanTargetName = kotlinCompilation.target.konanTarget.name
                         cfg.konanTargetName.value(konanTargetName)
-                        cfg.konanHome.set(kotlinCompileProvider.flatMap { (it as KotlinNativeCompile).konanHome })
 
                         val isHostSupported = HostManager().enabled.any {
                             it.name == konanTargetName
                         }
                         if (!isHostSupported) {
-                            val isKlibCrossCompilationEnabled = getKlibCrossCompilationSupport(
-                                project,
-                                kotlinCompilation
-                            )
-                            kspAATask.onlyIf {
-                                isKlibCrossCompilationEnabled.get()
-                            }
+                            configureCrossCompilationSkipCondition(project, kotlinCompilation, kspAATask)
                         }
                     }
 
                     cfg.profilingMode.value(
                         project.providers
                             .gradleProperty("ksp.ksp2.profiling.mode")
+                            .map { it.toBoolean() }
+                            .orElse(false)
+                    )
+                    // Opt-in: reuse processor classloaders across modules in the same build.
+                    // Off by default because it extends the lifetime of processor static state.
+                    cfg.cacheProcessorClassloader.value(
+                        project.providers
+                            .gradleProperty("ksp.classloader.cache.processors")
                             .map { it.toBoolean() }
                             .orElse(false)
                     )
@@ -447,27 +502,110 @@ abstract class KspAATask @Inject constructor(
             return kspTaskProvider
         }
 
+        private const val ENABLE_KLIBS_CROSSCOMPILATION_PROPERTY = "kotlin.native.enableKlibsCrossCompilation"
+        private const val CROSS_COMPILATION_SHARED_DATA_KEY = "crossCompilationMetadata"
+        private val KOTLIN_PROJECT_SHARED_DATA_ATTRIBUTE =
+            Attribute.of("org.jetbrains.kotlin.project-shared-data", String::class.java)
+
         /**
-         * Returns a Provider<Boolean> indicating whether klib cross-compilation is enabled.
-         * For Kotlin 2.3.20-Beta2+, uses KotlinNativeCompilation.crossCompilationSupported.
-         * For earlier versions, falls back to checking the gradle property kotlin.native.enableKlibsCrossCompilation.
+         * Configures [kspAATask] to skip when cross-compilation is not possible on the current host,
+         * mirroring how KGP skips compile tasks (see KGP's KotlinCreateNativeCompileTasksSideEffect).
+         *
+         * To remain compatible with the Configuration Cache, we split KGP's check:
+         *  1. Target-level check (evaluated during configuration): Checks host compatibility,
+         *     cross-compilation properties, and cinterops.
+         *  2. Dependency-level check (evaluated during execution): Reads shared metadata JSONs
+         *     from project dependencies (declared as task inputs to ensure correct task ordering).
+         *
+         * TODO(https://youtrack.jetbrains.com/issue/KT-87411): Replace with the public KGP API once available.
          */
-        private fun getKlibCrossCompilationSupport(
+        private fun configureCrossCompilationSkipCondition(
             project: Project,
-            kotlinCompilation: KotlinNativeCompilation
-        ): Provider<Boolean> {
+            kotlinCompilation: KotlinNativeCompilation,
+            kspAATask: KspAATask,
+        ) {
             val kotlinVersion = project.getKotlinPluginVersion()
-            val isSupportCrossCompilationPropertyAvailable =
+            val isCrossCompilationMetadataAvailable =
                 KotlinToolingVersion(kotlinVersion) >= KotlinToolingVersion("2.3.20-Beta2")
 
-            return if (isSupportCrossCompilationPropertyAvailable) {
-                kotlinCompilation.crossCompilationSupported
-            } else {
-                // Fallback for Kotlin versions before 2.3.20-Beta2
-                project.providers.gradleProperty(
-                    "kotlin.native.enableKlibsCrossCompilation"
-                ).orElse("false").map { it.toBoolean() }
+            val isKlibCrossCompilationEnabled = getKlibCrossCompilationEnabledProvider(project)
+
+            if (!isCrossCompilationMetadataAvailable) {
+                kspAATask.onlyIf { isKlibCrossCompilationEnabled.get() }
+                return
             }
+
+            val target = kotlinCompilation.target
+            val hasCinterops = project.objects.property(Boolean::class.java).convention(false)
+            target.compilations.configureEach { compilation ->
+                compilation.cinterops.configureEach {
+                    hasCinterops.set(true)
+                }
+            }
+
+            val isTargetCrossCompilationPossible = isKlibCrossCompilationEnabled.zip(hasCinterops) { klibCrossCompilationEnabled, targetHasCinterops ->
+                HostManager.hostOrNull != null &&
+                    klibCrossCompilationEnabled &&
+                    !targetHasCinterops
+            }
+            kspAATask.onlyIf("Cross compilation should be supported on host") {
+                isTargetCrossCompilationPossible.get()
+            }
+
+            val metadataFiles = getCrossCompilationMetadataFiles(project, kotlinCompilation)
+            kspAATask.crossCompilationMetadata.from(metadataFiles)
+            kspAATask.onlyIf("Cross compilation should be possible with project dependencies") { task ->
+                (task as KspAATask).crossCompilationMetadata.files.all(::isCrossCompilationSupportedBy)
+            }
+        }
+
+        private fun getKlibCrossCompilationEnabledProvider(project: Project): Provider<Boolean> {
+            val gradlePropertiesSetting = project.providers.gradleProperty(ENABLE_KLIBS_CROSSCOMPILATION_PROPERTY)
+                .map { it.toBoolean() }
+                .orElse(true)
+
+            val subprojectPropertiesSetting = project.providers
+                .fileContents(project.layout.projectDirectory.file("gradle.properties"))
+                .asText
+                .map { text ->
+                    val props = Properties().apply { load(java.io.StringReader(text)) }
+                    props.getProperty(ENABLE_KLIBS_CROSSCOMPILATION_PROPERTY)?.toBoolean()
+                }
+
+            return subprojectPropertiesSetting.orElse(gradlePropertiesSetting)
+        }
+
+        private fun getCrossCompilationMetadataFiles(
+            project: Project,
+            kotlinCompilation: KotlinNativeCompilation
+        ): FileCollection {
+            val configurationProvider = project.configurations.named(kotlinCompilation.compileDependencyConfigurationName)
+            val sharedDataUsage = project.objects.named(Usage::class.java, "kotlin-project-shared-data")
+            val filesProvider = configurationProvider.map { configuration ->
+                configuration.incoming.artifactView { view ->
+                    view.isLenient = true
+                    view.attributes.attribute(Usage.USAGE_ATTRIBUTE, sharedDataUsage)
+                    view.attributes.attribute(KOTLIN_PROJECT_SHARED_DATA_ATTRIBUTE, CROSS_COMPILATION_SHARED_DATA_KEY)
+                    view.attributes.attribute(
+                        Attribute.of("artifactType", String::class.java),
+                        "kotlin-project-shared-data-$CROSS_COMPILATION_SHARED_DATA_KEY"
+                    )
+                }.files
+            }
+            return project.files(filesProvider)
+        }
+
+        /**
+         * Parses the cross-compilation metadata JSON exported by KGP.
+         * Missing or malformed files default to supported (matching KGP's parser).
+         */
+        private fun isCrossCompilationSupportedBy(metadataFile: File): Boolean {
+            val content = runCatching { metadataFile.readText() }.getOrNull() ?: return true
+            return runCatching {
+                val parser = groovy.json.JsonSlurper()
+                val map = parser.parseText(content) as Map<*, *>
+                map["crossCompilationSupported"] as? Boolean
+            }.getOrNull() ?: true
         }
     }
 }
@@ -483,18 +621,21 @@ abstract class KspGradleConfig @Inject constructor() {
     @get:SkipWhenEmpty
     @get:IgnoreEmptyDirectories
     @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:NormalizeLineEndings
     abstract val sourceRoots: ConfigurableFileCollection
 
     @get:InputFiles
     @get:SkipWhenEmpty
     @get:IgnoreEmptyDirectories
     @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:NormalizeLineEndings
     abstract val commonSourceRoots: ConfigurableFileCollection
 
     @get:InputFiles
     @get:SkipWhenEmpty
     @get:IgnoreEmptyDirectories
     @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:NormalizeLineEndings
     abstract val javaSourceRoots: ConfigurableFileCollection
 
     // Marked as Internal for compilation avoidance.
@@ -543,7 +684,7 @@ abstract class KspGradleConfig @Inject constructor() {
     abstract val apOptions: MapProperty<String, String>
 
     // Unfortunately, passing project.logger over is not possible.
-    @get:Input
+    @get:Internal
     abstract val logLevel: Property<LogLevel>
 
     @get:Input
@@ -565,6 +706,10 @@ abstract class KspGradleConfig @Inject constructor() {
 
     @get:Input
     abstract val incrementalLog: Property<Boolean>
+
+    @get:Input
+    @get:Optional
+    abstract val incrementalGraphOrigin: Property<String>
 
     @get:Input
     abstract val experimentalPsiResolution: Property<Boolean>
@@ -592,52 +737,51 @@ abstract class KspGradleConfig @Inject constructor() {
     @get:Optional
     abstract val konanTargetName: Property<String>
 
-    @get:Input
-    @get:Optional
-    abstract val konanHome: Property<String>
-
     @get:Internal
     abstract val profilingMode: Property<Boolean>
+
+    /**
+     * Whether processor classloaders may be reused across modules within a build.
+     *
+     * Purely a performance knob; it must not affect task outputs, hence [Internal].
+     */
+    @get:Internal
+    abstract val cacheProcessorClassloader: Property<Boolean>
 }
 
 interface KspAAWorkParameter : WorkParameters {
-    var config: KspGradleConfig
-    var kspClasspath: ConfigurableFileCollection
+    val config: Property<KspGradleConfig>
+    val kspClasspath: ConfigurableFileCollection
     var modifiedSources: List<File>
     var removedSources: List<File>
     var changedClasses: List<String>
-    var isInputChangeIncremental: Boolean
 }
 
-var isolatedClassLoaderCache = mutableMapOf<String, URLClassLoader>()
 val doNotGC = mutableSetOf<Any>()
 
 abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
     override fun execute() {
-        val gradleCfg = parameters.config
+        val gradleCfg = parameters.config.get()
         val kspClasspath = parameters.kspClasspath
+        val isolatedClassLoaderCache = IsolatedClassLoaderCache.cache
         val key = kspClasspath.files.map { it.toURI().toURL() }.joinToString { it.path }
-        synchronized(isolatedClassLoaderCache) {
-            if (isolatedClassLoaderCache[key] == null) {
-                isolatedClassLoaderCache[key] = URLClassLoader(
-                    kspClasspath.files.map { it.toURI().toURL() }.toTypedArray(),
-                    ClassLoader.getPlatformClassLoader()
-                )
-            }
+        val isolatedClassLoader = isolatedClassLoaderCache.computeIfAbsent(key) {
+            URLClassLoader(
+                kspClasspath.files.map { it.toURI().toURL() }.toTypedArray(),
+                ClassLoader.getPlatformClassLoader()
+            )
         }
-        val isolatedClassLoader = isolatedClassLoaderCache[key]!!
 
         // Clean stale files for now.
         // TODO: support incremental processing.
         gradleCfg.outputBaseDir.get().asFile.deleteRecursively()
 
-        val processorClassloader = URLClassLoader(
-            gradleCfg.processorClasspath.files.map { it.toURI().toURL() }.toTypedArray(),
-            isolatedClassLoader
-        )
+        val cacheProcessorLoader = gradleCfg.cacheProcessorClassloader.get()
+        val processorClassloader =
+            getProcessorClassLoader(gradleCfg, isolatedClassLoader, kspClasspath, cacheProcessorLoader)
         if (gradleCfg.profilingMode.get()) {
             doNotGC.add(processorClassloader)
-        } else {
+        } else if (!cacheProcessorLoader) {
             doNotGC.clear()
         }
 
@@ -683,6 +827,7 @@ abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
 
             incremental = gradleCfg.incremental.get()
             incrementalLog = gradleCfg.incrementalLog.get()
+            incrementalLogGraphOrigin = gradleCfg.incrementalGraphOrigin.orNull
             experimentalPsiResolution = gradleCfg.experimentalPsiResolution.get()
 
             modifiedSources = parameters.modifiedSources
@@ -713,20 +858,6 @@ abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
                 KSPNativeConfig.Builder().apply {
                     this.setupSuper()
                     target = gradleCfg.konanTargetName.get()
-
-                    // Unlike other platforms, K/N sets up stdlib in the compiler, not KGP,
-                    // meaning that KotlinNativeCompile doesn't have stdlib.
-                    // FIXME: find a solution with KGP, K/N and AA owners
-                    val konanHome = File(gradleCfg.konanHome.get())
-                    val klib = File(konanHome, "klib")
-                    val common = File(klib, "common")
-                    val stdlib = File(common, "stdlib")
-                    libraries += stdlib
-                    val platform = File(klib, "platform")
-                    val targetLibDir = File(platform, target)
-                    targetLibDir.listFiles()?.let {
-                        libraries += it
-                    }
                 }.build()
             }
 
@@ -761,11 +892,51 @@ abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
             kspGradleLogger.exception(e.targetException)
             throw e.targetException
         } finally {
-            processorClassloader.close()
+            // Cached loaders are shared across modules for the lifetime of the build service,
+            // so closing here would break every subsequent module that reuses them.
+            if (!cacheProcessorLoader) {
+                processorClassloader.close()
+            }
         }
 
         if (exitCode != ExitCode.OK) {
             throw Exception("KSP failed with exit code: $exitCode")
+        }
+    }
+
+    /**
+     * Creates a classloader over the processor classpath, delegating to [isolatedClassLoader] so
+     * that processors resolve KSP's own API classes from the shared, already-cached parent.
+     */
+    private fun createProcessorClassLoader(
+        gradleCfg: KspGradleConfig,
+        isolatedClassLoader: ClassLoader,
+    ): URLClassLoader = URLClassLoader(
+        gradleCfg.processorClasspath.files.map { it.toURI().toURL() }.toTypedArray(),
+        isolatedClassLoader
+    )
+
+    /**
+     * Returns the classloader to load symbol processors from, reusing a cached one when
+     * [cacheProcessorLoader] is set.
+     *
+     * See [ProcessorClassLoaderKey] for why both classpaths take part in the cache key.
+     */
+    private fun getProcessorClassLoader(
+        gradleCfg: KspGradleConfig,
+        isolatedClassLoader: ClassLoader,
+        kspClasspath: ConfigurableFileCollection,
+        cacheProcessorLoader: Boolean,
+    ): URLClassLoader {
+        if (!cacheProcessorLoader) {
+            return createProcessorClassLoader(gradleCfg, isolatedClassLoader)
+        }
+        val processorKey = ProcessorClassLoaderKey(
+            kspClasspath = kspClasspath.files.map { it.path },
+            processorClasspath = gradleCfg.processorClasspath.files.map { it.path },
+        )
+        return IsolatedClassLoaderCache.processorCache.computeIfAbsent(processorKey) {
+            createProcessorClassLoader(gradleCfg, isolatedClassLoader)
         }
     }
 }

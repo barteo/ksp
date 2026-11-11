@@ -1,49 +1,29 @@
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import com.google.devtools.ksp.RelativizingInternalPathProvider
 import com.google.devtools.ksp.RelativizingPathProvider
-import org.objectweb.asm.ClassReader
-import org.objectweb.asm.ClassWriter
-import org.objectweb.asm.commons.ClassRemapper
-import org.objectweb.asm.commons.Remapper
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.jar.JarFile
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import org.jetbrains.org.objectweb.asm.ClassReader
+import org.jetbrains.org.objectweb.asm.ClassWriter
+import org.jetbrains.org.objectweb.asm.commons.ClassRemapper
+import org.jetbrains.org.objectweb.asm.commons.Remapper
 
 description = "Kotlin Symbol Processing implementation using Kotlin Analysis API"
-
-buildscript {
-    repositories {
-        mavenCentral()
-    }
-    dependencies {
-        classpath("org.ow2.asm:asm:9.9.1")
-        classpath("org.ow2.asm:asm-commons:9.9.1")
-    }
-}
 
 val signingKey: String? by project
 val signingPassword: String? by project
 
-val kotlinBaseVersion: String by project
-val kotlinxSerializationVersion: String by project
-val junitVersion: String by project
-val junit5Version: String by project
-val junitPlatformVersion: String by project
+val kotlinBaseVersion = libs.versions.kotlin.base.get()
 val libsForTesting: Configuration by configurations.creating
 val libsForTestingCommon: Configuration by configurations.creating
 
-val aaKotlinBaseVersion: String by project
-val aaIntellijVersion: String by project
-val aaGuavaVersion: String by project
-val aaAsmVersion: String by project
-val aaFastutilVersion: String by project
-val aaStax2Version: String by project
-val aaAaltoXmlVersion: String by project
-val aaStreamexVersion: String by project
-val aaCoroutinesVersion: String by project
+val aaKotlinBaseVersion = libs.versions.aa.kotlin.base.get()
+val aaIntellijVersion = libs.versions.aa.intellij.get()
+val aaCoroutinesVersion = libs.versions.aa.coroutines.get()
 
 plugins {
     kotlin("jvm")
@@ -58,12 +38,13 @@ val depJarsForCheck: Configuration by configurations.creating
 val compilerJar: Configuration by configurations.creating
 
 val originalLog4j: Configuration by configurations.creating
-val filteredLog4j = tasks.register<Jar>("filteredLog4j") {
-    from(originalLog4j.map { zipTree(it) }) {
-        exclude("org/apache/log4j/jdbc/**")
+val filteredLog4j =
+    tasks.register<Jar>("filteredLog4j") {
+        from(originalLog4j.map { zipTree(it) }) {
+            exclude("org/apache/log4j/jdbc/**")
+        }
+        archiveFileName.set("log4j-filtered.jar")
     }
-    archiveFileName.set("log4j-filtered.jar")
-}
 
 val intellijOriginal: Configuration by configurations.creating {
     isTransitive = false
@@ -71,26 +52,25 @@ val intellijOriginal: Configuration by configurations.creating {
 
 /**
  * Rewrites any use of `kotlinx/coroutines/internal/intellij/IntellijCoroutines` to
- * `com/intellij/util/IntelliJCoroutinesFacade` in dependencies declared in the
- * `intellijOriginal` configuration.
+ * `com/intellij/util/IntelliJCoroutinesFacade` in dependencies declared in the `intellijOriginal`
+ * configuration.
  */
 abstract class TransformIntellijDeps : DefaultTask() {
-    @get:InputFiles
-    abstract val inputJars: ConfigurableFileCollection
+    @get:InputFiles abstract val inputJars: ConfigurableFileCollection
 
-    @get:OutputDirectory
-    abstract val outputDir: DirectoryProperty
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
 
     @TaskAction
     fun transform() {
-        val remapper = object : Remapper() {
-            override fun map(internalName: String): String {
-                if (internalName == "kotlinx/coroutines/internal/intellij/IntellijCoroutines") {
-                    return "com/intellij/util/IntelliJCoroutinesFacade"
+        val remapper =
+            object : Remapper() {
+                override fun map(internalName: String): String {
+                    if (internalName == "kotlinx/coroutines/internal/intellij/IntellijCoroutines") {
+                        return "com/intellij/util/IntelliJCoroutinesFacade"
+                    }
+                    return super.map(internalName)
                 }
-                return super.map(internalName)
             }
-        }
 
         outputDir.get().asFile.apply {
             if (exists()) deleteRecursively()
@@ -108,15 +88,16 @@ abstract class TransformIntellijDeps : DefaultTask() {
                             continue
                         }
                         val bytes = zip.getInputStream(entry).readBytes()
-                        val newBytes = if (entry.name.endsWith(".class")) {
-                            val cr = ClassReader(bytes)
-                            val cw = ClassWriter(0)
-                            val cv = ClassRemapper(cw, remapper)
-                            cr.accept(cv, 0)
-                            cw.toByteArray()
-                        } else {
-                            bytes
-                        }
+                        val newBytes =
+                            if (entry.name.endsWith(".class")) {
+                                val cr = ClassReader(bytes)
+                                val cw = ClassWriter(0)
+                                val cv = ClassRemapper(cw, remapper)
+                                cr.accept(cv, 0)
+                                cw.toByteArray()
+                            } else {
+                                bytes
+                            }
                         zos.putNextEntry(ZipEntry(entry.name))
                         zos.write(newBytes)
                         zos.closeEntry()
@@ -127,82 +108,83 @@ abstract class TransformIntellijDeps : DefaultTask() {
     }
 }
 
-val transformedIntellijDeps = tasks.register<TransformIntellijDeps>("transformedIntellijDeps") {
-    inputJars.from(intellijOriginal)
-    outputDir.set(layout.buildDirectory.dir("transformedIntellijDeps"))
-}
+val transformedIntellijDeps =
+    tasks.register<TransformIntellijDeps>("transformedIntellijDeps") {
+        inputJars.from(intellijOriginal)
+        outputDir.set(layout.buildDirectory.dir("transformedIntellijDeps"))
+    }
 
 dependencies {
     listOf(
-        "com.jetbrains.intellij.platform:util-rt",
-        "com.jetbrains.intellij.platform:util-class-loader",
-        "com.jetbrains.intellij.platform:util-text-matching",
-        "com.jetbrains.intellij.platform:util",
-        "com.jetbrains.intellij.platform:util-base",
-        "com.jetbrains.intellij.platform:util-coroutines",
-        "com.jetbrains.intellij.platform:util-xml-dom",
-        "com.jetbrains.intellij.platform:core",
-        "com.jetbrains.intellij.platform:core-impl",
-        "com.jetbrains.intellij.platform:extensions",
-        "com.jetbrains.intellij.platform:diagnostic",
-        "com.jetbrains.intellij.platform:diagnostic-telemetry",
-        "com.jetbrains.intellij.java:java-frontback-psi",
-        "com.jetbrains.intellij.java:java-frontback-psi-impl",
-        "com.jetbrains.intellij.java:java-psi",
-        "com.jetbrains.intellij.java:java-psi-impl",
-    ).forEach {
-        intellijOriginal("$it:$aaIntellijVersion")
-        depSourceJars("$it:$aaIntellijVersion:sources") { isTransitive = false }
-    }
+            "com.jetbrains.intellij.platform:util-rt",
+            "com.jetbrains.intellij.platform:util-class-loader",
+            "com.jetbrains.intellij.platform:util-text-matching",
+            "com.jetbrains.intellij.platform:util",
+            "com.jetbrains.intellij.platform:util-base",
+            "com.jetbrains.intellij.platform:util-coroutines",
+            "com.jetbrains.intellij.platform:util-xml-dom",
+            "com.jetbrains.intellij.platform:core",
+            "com.jetbrains.intellij.platform:core-impl",
+            "com.jetbrains.intellij.platform:extensions",
+            "com.jetbrains.intellij.platform:diagnostic",
+            "com.jetbrains.intellij.platform:diagnostic-telemetry",
+            "com.jetbrains.intellij.java:java-frontback-psi",
+            "com.jetbrains.intellij.java:java-frontback-psi-impl",
+            "com.jetbrains.intellij.java:java-psi",
+            "com.jetbrains.intellij.java:java-psi-impl",
+        )
+        .forEach {
+            intellijOriginal("$it:$aaIntellijVersion")
+            depSourceJars("$it:$aaIntellijVersion:sources") { isTransitive = false }
+        }
     implementation(files(transformedIntellijDeps.map { it.outputDir.asFileTree }))
 
     listOf(
-        "org.jetbrains.kotlin:analysis-api-k2-for-ide",
-        "org.jetbrains.kotlin:analysis-api-for-ide",
-        "org.jetbrains.kotlin:low-level-api-fir-for-ide",
-        "org.jetbrains.kotlin:analysis-api-platform-interface-for-ide",
-        "org.jetbrains.kotlin:symbol-light-classes-for-ide",
-        "org.jetbrains.kotlin:analysis-api-standalone-for-ide",
-        "org.jetbrains.kotlin:analysis-api-impl-base-for-ide",
-        "org.jetbrains.kotlin:kotlin-compiler-common-for-ide",
-        "org.jetbrains.kotlin:kotlin-compiler-fir-for-ide",
-        "org.jetbrains.kotlin:kotlin-compiler-fe10-for-ide",
-        "org.jetbrains.kotlin:kotlin-compiler-ir-for-ide",
-    ).forEach {
-        implementation("$it:$aaKotlinBaseVersion") { isTransitive = false }
-        depSourceJars("$it:$aaKotlinBaseVersion:sources") { isTransitive = false }
-    }
+            "org.jetbrains.kotlin:analysis-api-k2-for-ide",
+            "org.jetbrains.kotlin:analysis-api-for-ide",
+            "org.jetbrains.kotlin:low-level-api-fir-for-ide",
+            "org.jetbrains.kotlin:analysis-api-platform-interface-for-ide",
+            "org.jetbrains.kotlin:symbol-light-classes-for-ide",
+            "org.jetbrains.kotlin:analysis-api-standalone-for-ide",
+            "org.jetbrains.kotlin:analysis-api-impl-base-for-ide",
+            "org.jetbrains.kotlin:kotlin-compiler-common-for-ide",
+            "org.jetbrains.kotlin:kotlin-compiler-fir-for-ide",
+            "org.jetbrains.kotlin:kotlin-compiler-fe10-for-ide",
+            "org.jetbrains.kotlin:kotlin-compiler-ir-for-ide",
+        )
+        .forEach {
+            implementation("$it:$aaKotlinBaseVersion") { isTransitive = false }
+            depSourceJars("$it:$aaKotlinBaseVersion:sources") { isTransitive = false }
+        }
 
-    implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.3.4")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$kotlinxSerializationVersion")
+    implementation(libs.aa.collectionsImmutable)
+    implementation(libs.kotlinx.serialization.json)
     compileOnly(kotlin("stdlib", aaKotlinBaseVersion))
 
-    implementation("com.google.guava:guava:$aaGuavaVersion")
-    implementation("one.util:streamex:$aaStreamexVersion")
-    implementation("org.jetbrains.intellij.deps:asm-all:$aaAsmVersion")
-    implementation("org.codehaus.woodstox:stax2-api:$aaStax2Version") { isTransitive = false }
-    implementation("com.fasterxml:aalto-xml:$aaAaltoXmlVersion") { isTransitive = false }
-    implementation("com.github.ben-manes.caffeine:caffeine:2.9.3")
-    implementation("org.jetbrains.intellij.deps.jna:jna:5.9.0.26") { isTransitive = false }
-    implementation("org.jetbrains.intellij.deps.jna:jna-platform:5.9.0.26") { isTransitive = false }
-    implementation("org.jetbrains.intellij.deps:trove4j:1.0.20200330") { isTransitive = false }
-    originalLog4j("org.jetbrains.intellij.deps:log4j:1.2.17.2") { isTransitive = false }
+    implementation(libs.aa.guava)
+    implementation(libs.aa.streamex)
+    implementation(libs.aa.asm)
+    implementation(libs.aa.stax2) { isTransitive = false }
+    implementation(libs.aa.aalto.xml) { isTransitive = false }
+    implementation(libs.aa.caffeine)
+    implementation(libs.aa.jna) { isTransitive = false }
+    implementation(libs.aa.jnaPlatform) { isTransitive = false }
+    implementation(libs.aa.trove4j) { isTransitive = false }
+    originalLog4j(libs.aa.log4j) { isTransitive = false }
     implementation(files(filteredLog4j))
-    implementation("org.jetbrains.intellij.deps:jdom:2.0.6") { isTransitive = false }
-    implementation("io.javaslang:javaslang:2.0.6")
-    implementation("javax.inject:javax.inject:1")
-    implementation("org.jetbrains.kotlin:kotlin-reflect:1.6.10")
-    implementation("org.lz4:lz4-java:1.7.1") { isTransitive = false }
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:$aaCoroutinesVersion")
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-core:$aaCoroutinesVersion")
+    implementation(libs.aa.jdom) { isTransitive = false }
+    implementation(libs.aa.javaxInject)
+    implementation(libs.aa.lz4) { isTransitive = false }
+    compileOnly(libs.kotlinx.coroutines.coreJvm)
+    compileOnly(libs.kotlinx.coroutines.core)
     implementation(
-        "org.jetbrains.intellij.deps.fastutil:intellij-deps-fastutil:$aaFastutilVersion"
+        libs.aa.fastutil
     ) {
         isTransitive = false
     }
-    implementation("org.jetbrains:annotations:24.1.0")
+    implementation(libs.aa.annotations)
 
-    implementation("io.opentelemetry:opentelemetry-api:1.34.1") { isTransitive = false }
+    implementation(libs.aa.opentelemetry) { isTransitive = false }
 
     compileOnly(project(":common-deps"))
 
@@ -210,20 +192,23 @@ dependencies {
     implementation(project(":common-util"))
 
     testImplementation(kotlin("stdlib", aaKotlinBaseVersion))
-    testImplementation("junit:junit:$junitVersion")
-    testImplementation("org.junit.jupiter:junit-jupiter-api:$junit5Version")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:$junit5Version")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-params:$junit5Version")
-    testRuntimeOnly("org.junit.platform:junit-platform-suite:$junitPlatformVersion")
+    testImplementation(libs.junit4)
+    testImplementation(libs.junit.jupiter.api)
+    testRuntimeOnly(libs.junit.jupiter.engine)
+    testRuntimeOnly(libs.junit.jupiter.params)
+    testRuntimeOnly(libs.junit.platform.suite)
     testImplementation("org.jetbrains.kotlin:kotlin-compiler:$aaKotlinBaseVersion")
-    testImplementation("org.jetbrains.kotlin:kotlin-compiler-internal-test-framework:$aaKotlinBaseVersion")
+    testImplementation(
+        "org.jetbrains.kotlin:kotlin-compiler-internal-test-framework:$aaKotlinBaseVersion"
+    )
     testImplementation(project(":common-deps"))
     testImplementation(project(":test-utils"))
     testImplementation("org.jetbrains.kotlin:analysis-api-test-framework:$aaKotlinBaseVersion")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:$aaCoroutinesVersion")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$aaCoroutinesVersion")
+    testImplementation(libs.kotlinx.coroutines.coreJvm)
+    testImplementation(libs.kotlinx.coroutines.core)
 
-    // See AbstractKSPTest's init block if you change any of the `libsForTesting` or `libsForTestingCommon` dependencies.
+    // See AbstractKSPTest's init block if you change any of the `libsForTesting` or
+    // `libsForTestingCommon` dependencies.
     libsForTesting(kotlin("stdlib", aaKotlinBaseVersion))
     libsForTesting(kotlin("test", aaKotlinBaseVersion))
     libsForTesting(kotlin("script-runtime", aaKotlinBaseVersion))
@@ -243,6 +228,7 @@ sourceSets.main {
 }
 
 fun Project.javaPluginExtension(): JavaPluginExtension = the()
+
 val JavaPluginExtension.testSourceSet: SourceSet
     get() = sourceSets.getByName("test")
 val Project.testSourceSet: SourceSet
@@ -271,20 +257,15 @@ tasks.withType<ShadowJar>().configureEach {
 }
 
 abstract class ValidateShadowJar : DefaultTask() {
-    @get:Inject
-    abstract val execOperations: ExecOperations
+    @get:Inject abstract val execOperations: ExecOperations
 
-    @get:InputFile
-    abstract val inputFile: RegularFileProperty
+    @get:InputFile abstract val inputFile: RegularFileProperty
 
-    @get:InputFiles
-    abstract val classpath: ConfigurableFileCollection
+    @get:InputFiles abstract val classpath: ConfigurableFileCollection
 
-    @get:InputFile
-    abstract val baselineFile: RegularFileProperty
+    @get:InputFile abstract val baselineFile: RegularFileProperty
 
-    @get:OutputFile
-    abstract val outputFile: RegularFileProperty
+    @get:OutputFile abstract val outputFile: RegularFileProperty
 
     @TaskAction
     fun validate() {
@@ -294,11 +275,15 @@ abstract class ValidateShadowJar : DefaultTask() {
         val execResult = execOperations.exec {
             isIgnoreExitValue = true // Prevent throwing
             executable = "jdeps"
-            args = listOf(
-                "--multi-release", "base",
-                "--missing-deps",
-                "-cp", depJars.joinToString(File.pathSeparator), jarJar.path
-            )
+            args =
+                listOf(
+                    "--multi-release",
+                    "base",
+                    "--missing-deps",
+                    "-cp",
+                    depJars.joinToString(File.pathSeparator),
+                    jarJar.path,
+                )
             standardOutput = stdout
         }
         if (execResult.exitValue != 0) {
@@ -315,7 +300,8 @@ abstract class ValidateShadowJar : DefaultTask() {
                 jdeps missing dependencies output has changed.
                 Compare expected ${baselineFile.get().asFile.absolutePath} with
                 actual ${outputFile.get().asFile.absolutePath}.
-                """.trimIndent()
+                """
+                    .trimIndent()
             )
         }
 
@@ -325,7 +311,8 @@ abstract class ValidateShadowJar : DefaultTask() {
                     throw Exception(
                         """
                         Validation failed: Found unexpected package 'org/apache/log4j/jdbc' in the shadow JAR.
-                        """.trimIndent()
+                        """
+                            .trimIndent()
                     )
                 }
             }
@@ -333,30 +320,33 @@ abstract class ValidateShadowJar : DefaultTask() {
     }
 }
 
-val validateShadowJar = tasks.register<ValidateShadowJar>("validateShadowJar") {
-    inputFile.set(tasks.shadowJar.flatMap { it.archiveFile })
-    classpath.from(depJarsForCheck.incoming.artifactView { }.files)
-    baselineFile.set(layout.projectDirectory.file("shadow-validation-baseline.txt"))
-    outputFile.set(layout.buildDirectory.file("validateShadowJar.txt"))
-}
+val validateShadowJar =
+    tasks.register<ValidateShadowJar>("validateShadowJar") {
+        inputFile.set(tasks.shadowJar.flatMap { it.archiveFile })
+        classpath.from(depJarsForCheck.incoming.artifactView {}.files)
+        baselineFile.set(layout.projectDirectory.file("shadow-validation-baseline.txt"))
+        outputFile.set(layout.buildDirectory.file("validateShadowJar.txt"))
+    }
 
 tasks.named("check").configure {
     dependsOn(validateShadowJar)
 }
 
-val sourcesJar = tasks.register<Jar>("sourcesJar") {
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    archiveClassifier.set("sources")
-    from(sourceSets.main.map { it.allSource })
-    from(project(":common-util").sourceSets.main.get().allSource)
-    depSourceJars.resolve().forEach {
-        from(zipTree(it))
+val sourcesJar =
+    tasks.register<Jar>("sourcesJar") {
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        archiveClassifier.set("sources")
+        from(sourceSets.main.map { it.allSource })
+        from(project(":common-util").sourceSets.main.get().allSource)
+        depSourceJars.resolve().forEach {
+            from(zipTree(it))
+        }
     }
-}
-val dokkaJavadocJar = tasks.register<Jar>("dokkaJavadocJar") {
-    archiveClassifier.set("javadoc")
-    from(tasks.dokkaJavadoc.flatMap { it.outputDirectory })
-}
+val dokkaJavadocJar =
+    tasks.register<Jar>("dokkaJavadocJar") {
+        archiveClassifier.set("javadoc")
+        from(tasks.dokkaJavadoc.flatMap { it.outputDirectory })
+    }
 
 publishing {
     publications {
@@ -373,7 +363,7 @@ publishing {
                         groupId: String,
                         artifactId: String,
                         version: String,
-                        scope: String = "runtime"
+                        scope: String = "runtime",
                     ) {
                         appendNode("dependency").apply {
                             appendNode("groupId", groupId)
@@ -388,14 +378,19 @@ publishing {
                         addDependency(
                             "org.jetbrains.kotlinx",
                             "kotlinx-coroutines-core-jvm",
-                            aaCoroutinesVersion
+                            aaCoroutinesVersion,
                         )
-                        addDependency("com.google.devtools.ksp", "symbol-processing-api", version, "compile")
+                        addDependency(
+                            "com.google.devtools.ksp",
+                            "symbol-processing-api",
+                            version,
+                            "compile",
+                        )
                         addDependency(
                             "com.google.devtools.ksp",
                             "symbol-processing-common-deps",
                             version,
-                            "compile"
+                            "compile",
                         )
                     }
                 }
@@ -416,19 +411,21 @@ kotlin {
     }
 }
 
-val copyLibsForTesting = tasks.register<Copy>("copyLibsForTesting") {
-    from(configurations["libsForTesting"])
-    into("dist/kotlinc/lib")
-    val escaped = Regex.escape(aaKotlinBaseVersion)
-    rename("(.+)-$escaped\\.jar", "$1.jar")
-}
+val copyLibsForTesting =
+    tasks.register<Copy>("copyLibsForTesting") {
+        from(configurations["libsForTesting"])
+        into("dist/kotlinc/lib")
+        val escaped = Regex.escape(aaKotlinBaseVersion)
+        rename("(.+)-$escaped\\.jar", "$1.jar")
+    }
 
-val copyLibsForTestingCommon = tasks.register<Copy>("copyLibsForTestingCommon") {
-    from(configurations["libsForTestingCommon"])
-    into("dist/common")
-    val escaped = Regex.escape(aaKotlinBaseVersion)
-    rename("(.+)-$escaped\\.jar", "$1.jar")
-}
+val copyLibsForTestingCommon =
+    tasks.register<Copy>("copyLibsForTestingCommon") {
+        from(configurations["libsForTestingCommon"])
+        into("dist/common")
+        val escaped = Regex.escape(aaKotlinBaseVersion)
+        rename("(.+)-$escaped\\.jar", "$1.jar")
+    }
 
 tasks.test {
     dependsOn(copyLibsForTesting)
@@ -445,10 +442,8 @@ tasks.test {
         events("passed", "skipped", "failed")
     }
 
-    val ideaHomeDir = layout.buildDirectory.dir("tmp/ideaHome")
-        .get()
-        .asFile
-        .apply { if (!exists()) mkdirs() }
+    val ideaHomeDir =
+        layout.buildDirectory.dir("tmp/ideaHome").get().asFile.apply { if (!exists()) mkdirs() }
     jvmArgumentProviders.add(RelativizingPathProvider("idea.home.path", ideaHomeDir))
     jvmArgumentProviders.add(RelativizingInternalPathProvider("java.io.tmpdir", temporaryDir))
 }

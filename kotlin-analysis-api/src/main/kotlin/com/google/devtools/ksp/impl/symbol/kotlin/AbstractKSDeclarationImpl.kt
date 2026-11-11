@@ -86,10 +86,11 @@ abstract class AbstractKSDeclarationImpl : KSDeclaration, Deferrable {
             when (val psi = ktDeclarationSymbol.psi) {
                 is KtModifierListOwner -> psi.toKSModifiers()
                 is PsiModifierListOwner -> psi.toKSModifiers()
+                null -> emptySet() // Kotlin property without backing field
                 else -> throw InternalKSPException(
                     "Unexpected symbol type ${ktDeclarationSymbol.psi?.javaClass}",
                     this.location,
-                    psi?.javaClass ?: this.javaClass
+                    psi.javaClass
                 )
             }
         }
@@ -102,7 +103,12 @@ abstract class AbstractKSDeclarationImpl : KSDeclaration, Deferrable {
     override val packageName: KSName by lazy {
         // source
         if (origin == Origin.KOTLIN || origin == Origin.JAVA) {
-            containingFile!!.packageName
+            containingFile?.packageName
+                ?: throw InternalKSPException(
+                    "Unexpected null containing file for '${qualifiedName?.asString() ?: simpleName.asString()}'",
+                    location,
+                    this@AbstractKSDeclarationImpl.javaClass
+                )
         } else {
             // top level declaration
             when (val ktDeclarationSymbol = this.ktDeclarationSymbol) {

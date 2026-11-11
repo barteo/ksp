@@ -16,9 +16,17 @@
  */
 package com.google.devtools.ksp.symbol
 
-/**
- * A visitor for program elements
- */
+/** A visitor for program elements */
+@Deprecated(
+    message = "KSVisitor is deprecated in favor of KSVisitorNext which supports backing fields.\n" +
+        "In an upcoming KSP version, KSVisitorNext will be deprecated and implementations should move back to KSVisitor.\n" +
+        "This is done to preserve binary compatibility and to avoid breaking changes for users\n" +
+        "while giving library / processor authors time to support the new features.",
+    replaceWith = ReplaceWith(
+        expression = "KSVisitorNext",
+        imports = ["com.google.devtools.ksp.symbol.KSVisitorNext"],
+    ),
+)
 interface KSVisitor<D, R> {
     fun visitNode(node: KSNode, data: D): R
 

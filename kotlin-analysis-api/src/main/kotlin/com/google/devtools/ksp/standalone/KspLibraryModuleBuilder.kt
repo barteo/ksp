@@ -82,40 +82,29 @@ inline fun KtModuleProviderBuilder.buildKspLibraryModule(init: KspLibraryModuleB
     return KspLibraryModuleBuilder(coreApplicationEnvironment, project).apply(init).build()
 }
 
-internal class SimpleTrie(paths: List<String>) {
-    class TrieNode {
-        var isTerminal: Boolean = false
-    }
-
-    val root = TrieNode()
-
-    private val m = mutableMapOf<Pair<TrieNode, String>, TrieNode>().apply {
-        paths.forEach { path ->
-            var p = root
-            for (d in path.trim('/').split('/')) {
-                p = getOrPut(Pair(p, d)) { TrieNode() }
-            }
-            p.isTerminal = true
-        }
-    }
-
-    fun contains(s: String): Boolean {
-        var p = root
-        for (d in s.trim('/').split('/')) {
-            p = m.get(Pair(p, d))?.also {
-                if (it.isTerminal)
-                    return true
-            } ?: return false
-        }
-        return false
-    }
-}
-
 internal class LibraryRootsSearchScope(roots: List<VirtualFile>) : GlobalSearchScope() {
-    val trie: SimpleTrie = SimpleTrie(roots.map { it.path })
+    private val rootFiles: Set<VirtualFile> = roots.toSet()
+    private val rootUrls: Set<String> = roots.mapTo(HashSet()) { it.url }
 
     override fun contains(file: VirtualFile): Boolean {
-        return trie.contains(file.path)
+        var current: VirtualFile? = file
+        var prev: VirtualFile = file
+        while (current != null) {
+            if (current in rootFiles) {
+                return true
+            }
+            prev = current
+            current = current.parent
+        }
+        // This is needed because CoreJarVirtualFile.equals compares the identity so
+        // it misses finding a root when the CoreJarVirtualFile instance has changed for
+        // that root. This can happen when multiple KSP executions are running in parallel
+        // because the CoreJarFileSystem instance is shared between all KSP executions,
+        // and each KSP execution clears the file handler cache after it's finished executing.
+        // To fix this, we fall back to checking if the url is in rootUrls. We use this only as a
+        // fallback since it can be expensive since CoreJarVirtualFile.getUrl() is not cached.
+        // See https://github.com/google/ksp/issues/3286.
+        return prev.url in rootUrls
     }
 
     override fun isSearchInModuleContent(aModule: Module): Boolean = false

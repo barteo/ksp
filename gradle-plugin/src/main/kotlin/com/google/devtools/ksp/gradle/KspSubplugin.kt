@@ -145,7 +145,8 @@ class KspGradleSubplugin @Inject internal constructor(private val registry: Tool
         if (useKsp2.not()) {
             throw RuntimeException(
                 "KSP1 is no longer available. Please use KSP2 instead and do not explicitly set ksp.useKsp2 to false " +
-                    "via the DSL or the Gradle property please"
+                    "via the DSL or the Gradle property. " +
+                    "The ksp.useKSP2 property will be removed in the future."
             )
         }
         return true
@@ -203,8 +204,11 @@ class KspGradleSubplugin @Inject internal constructor(private val registry: Tool
             kotlinCompilation,
             kotlinCompileProvider,
             processorClasspath,
-            kspExtension
+            kspExtension,
         )
+
+        val isAndroidKmp = project.isAndroidKmpProject() &&
+            kotlinCompilation is KotlinMultiplatformAndroidCompilation
 
         val generatedSources = arrayOf(
             project.files(kotlinOutputDir).builtBy(kspTaskProvider),
@@ -215,8 +219,9 @@ class KspGradleSubplugin @Inject internal constructor(private val registry: Tool
             // They will be observed by downstreams and violate current build scheme.
             kotlinCompileProvider.configure { it.source(*generatedSources) }
         } else {
-            val skipAddingSources = kotlinCompilation is KotlinJvmAndroidCompilation &&
-                project.isAgpBuiltInKotlinUsed() && project.canUseInternalKspApis()
+            val skipAddingSources = (kotlinCompilation is KotlinJvmAndroidCompilation &&
+                project.isAgpBuiltInKotlinUsed() && project.canUseInternalKspApis()) ||
+                isAndroidKmp
 
             if (!skipAddingSources) {
                 registerOutputWithKotlinSrcdirs(project, kotlinCompilation, kspTaskProvider, *generatedSources)
@@ -256,6 +261,13 @@ class KspGradleSubplugin @Inject internal constructor(private val registry: Tool
                 resourcesOutputDir = resourceOutputDir,
                 androidComponent = component,
             )
+            if (!kspConfigurations.allowAllTargetConfiguration &&
+                project.pluginManager.hasPlugin("kotlin-multiplatform")
+            ) {
+                project.configurations.findByName("ksp")?.let { kspConfig ->
+                    processorClasspath.setExtendsFrom(processorClasspath.extendsFrom.filter { it != kspConfig })
+                }
+            }
         }
 
         // The variant API in KMP runs after KotlinCompilerPluginSupportPlugin.applyToCompilation()
@@ -454,7 +466,6 @@ internal fun getCPChanges(
 internal fun Configuration.markResolvable(): Configuration = apply {
     isCanBeResolved = true
     isCanBeConsumed = false
-    isVisible = false
 }
 
 /**

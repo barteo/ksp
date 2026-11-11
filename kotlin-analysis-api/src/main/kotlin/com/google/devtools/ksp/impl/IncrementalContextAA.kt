@@ -17,16 +17,21 @@
 
 package com.google.devtools.ksp.impl
 
+import com.google.devtools.ksp.IncrementalContextLoggingOptions
 import com.google.devtools.ksp.common.IncrementalContextBase
 import com.google.devtools.ksp.common.LookupStorageWrapper
 import com.google.devtools.ksp.common.LookupSymbolWrapper
 import com.google.devtools.ksp.common.LookupTrackerWrapper
+import com.google.devtools.ksp.common.NoSourceFile
+import com.google.devtools.ksp.common.stripSyntheticFileNameModifiers
 import com.google.devtools.ksp.containingFile
 import com.google.devtools.ksp.impl.symbol.kotlin.KSFileJavaImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.KSFunctionDeclarationImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.KSPropertyDeclarationImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.KSPropertyDeclarationJavaImpl
 import com.google.devtools.ksp.impl.symbol.kotlin.analyze
+import com.google.devtools.ksp.impl.symbol.kotlin.getFqn
+import com.google.devtools.ksp.impl.symbol.kotlin.separateQualifierAndName
 import com.google.devtools.ksp.impl.symbol.kotlin.typeArguments
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSDeclaration
@@ -50,6 +55,7 @@ import org.jetbrains.kotlin.analysis.api.types.KaFlexibleType
 import org.jetbrains.kotlin.analysis.api.types.KaIntersectionType
 import org.jetbrains.kotlin.analysis.api.types.KaType
 import org.jetbrains.kotlin.analysis.api.types.KaTypeParameterType
+import org.jetbrains.kotlin.analysis.api.types.symbol
 import org.jetbrains.kotlin.incremental.IncrementalCompilationContext
 import org.jetbrains.kotlin.incremental.LookupStorage
 import org.jetbrains.kotlin.incremental.LookupSymbol
@@ -60,12 +66,13 @@ import org.jetbrains.kotlin.incremental.components.ScopeKind
 import org.jetbrains.kotlin.incremental.storage.FileToPathConverter
 import org.jetbrains.kotlin.incremental.update
 import java.io.File
+import java.io.Writer
 
 class IncrementalContextAA(
     override val isIncremental: Boolean,
     lookupTracker: LookupTracker,
     anyChangesWildcard: File,
-    incrementalLog: Boolean,
+    loggingOptions: IncrementalContextLoggingOptions,
     baseDir: File,
     cachesDir: File,
     kspOutputDir: File,
@@ -74,7 +81,7 @@ class IncrementalContextAA(
     changedClasses: List<String>,
 ) : IncrementalContextBase(
     anyChangesWildcard,
-    incrementalLog,
+    loggingOptions,
     baseDir,
     cachesDir,
     kspOutputDir,
@@ -86,14 +93,37 @@ class IncrementalContextAA(
     private val icContext = IncrementalCompilationContext(PATH_CONVERTER, PATH_CONVERTER, true)
 
     private val symbolLookupCacheDir = File(cachesDir, "symbolLookups")
+
+    private val symbolTrackerLogFile: Writer? =
+        if (loggingOptions.incrementalLoggingEnabled) {
+            mkLogFile("symbolTrackerTrace.log").bufferedWriter()
+                .also { logFiles.add(it) }
+        } else {
+            null
+        }
+
+    private val classTrackerLogFile: Writer? =
+        if (loggingOptions.incrementalLoggingEnabled) {
+            mkLogFile("enumClassTrackerTrace.log").bufferedWriter()
+                .also { logFiles.add(it) }
+        } else {
+            null
+        }
+
     override val symbolLookupTracker =
-        LookupTrackerWrapperImpl((lookupTracker as? DualLookupTracker)?.symbolTracker ?: LookupTracker.DO_NOTHING)
+        LookupTrackerWrapperImpl(
+            (lookupTracker as? DualLookupTracker)?.symbolTracker ?: LookupTracker.DO_NOTHING,
+            symbolTrackerLogFile
+        )
     override val symbolLookupCache = LookupStorageWrapperImpl(LookupStorage(symbolLookupCacheDir, icContext))
 
     // TODO: rewrite LookupStorage to share file-to-id, etc.
     private val classLookupCacheDir = File(cachesDir, "classLookups")
     override val classLookupTracker =
-        LookupTrackerWrapperImpl((lookupTracker as? DualLookupTracker)?.classTracker ?: LookupTracker.DO_NOTHING)
+        LookupTrackerWrapperImpl(
+            (lookupTracker as? DualLookupTracker)?.classTracker ?: LookupTracker.DO_NOTHING,
+            classTrackerLogFile
+        )
     override val classLookupCache = LookupStorageWrapperImpl(LookupStorage(classLookupCacheDir, icContext))
 
     // Debugging and testing only.
@@ -101,7 +131,11 @@ class IncrementalContextAA(
         val map = mutableMapOf<String, List<String>>()
         symbolLookupTracker.lookups.entrySet().forEach { e ->
             val key = "${e.key.scope}.${e.key.name}"
-            map[key] = e.value.map { PATH_CONVERTER.toFile(it).path }
+            map[key] = e.value.map {
+                // Safely try to relativize, since it may fail on Windows
+                // where it and baseDir have different roots.
+                File(it).relativeToOrNull(baseDir)?.path ?: it
+            }
         }
         return map
     }
@@ -115,23 +149,28 @@ class IncrementalContextAA(
                 val fqn = type.classId.asFqNameString()
                 recordLookup(file, fqn)
             }
+
             is KaFlexibleType -> {
                 recordWithArgs(type.lowerBound, file)
                 recordWithArgs(type.upperBound, file)
             }
+
             is KaIntersectionType -> {
                 type.conjuncts.forEach {
                     recordWithArgs(it, file)
                 }
             }
+
             is KaCapturedType -> {
                 type.projection.type?.let {
                     recordWithArgs(it, file)
                 }
             }
+
             is KaDefinitelyNotNullType -> {
                 recordWithArgs(type.original, file)
             }
+
             is KaErrorType, is KaDynamicType, is KaTypeParameterType -> {}
         }
     }
@@ -143,6 +182,65 @@ class IncrementalContextAA(
         val file = (context?.containingFile as? KSFileJavaImpl)?.psi ?: return
 
         recordWithArgs(type, file)
+    }
+
+    /**
+     * Records a reference to `MyClass::class`.
+     * 
+     * @param type the referenced type, e.g., `MyClass`
+     * @param declaration the closest enclosing declaration where the reference occurs.
+     *                    Callers can use [KSNode.findParentDeclaration] to obtain the enclosing declaration.
+     */
+    fun recordClassReferenceLookup(type: KaType, declaration: KSDeclaration) {
+        if (!isIncremental) {
+            return
+        }
+
+        val fqn = type.symbol?.classId?.asFqNameString()
+            ?: type.getFqn()
+            ?: return
+
+        recordClassReferenceLookup(fqn, declaration)
+    }
+
+    /**
+     * Records a reference to `MyClass::class`.
+     * 
+     * @param fqn the fully qualified name of the referenced type, e.g., the fully qualified name of `MyClass`.
+     * @param declaration the closest enclosing declaration where the reference occurs.
+     *                    Callers can use [KSNode.findParentDeclaration] to obtain the enclosing declaration.
+     */
+    fun recordClassReferenceLookup(fqn: String, declaration: KSDeclaration) {
+        if (!isIncremental) {
+            return
+        }
+
+        val (scope, name) = separateQualifierAndName(fqn)
+
+        symbolLookupTracker.record(filePathFor(declaration), scope, name)
+    }
+
+    /**
+     * Returns a string representing a file path for [declaration].
+     *
+     * If the filepath is already available, it is returned. Otherwise, a synthetic filepath is generated.
+     */
+    private fun filePathFor(declaration: KSDeclaration): String {
+        // Try directly getting the filepath
+        val maybeAvailableFilePath = declaration.containingFile?.filePath
+        if (maybeAvailableFilePath != null) {
+            return maybeAvailableFilePath
+        }
+
+        // Construct synthetic filepath
+        val parentDeclarationName = declaration.qualifiedName?.asString()
+            ?: buildString {
+                append(declaration.packageName.asString())
+                append('.')
+                append(declaration.simpleName.asString())
+            }
+
+        return NoSourceFile(baseDir, parentDeclarationName).filePath
     }
 
     @OptIn(KaExperimentalApi::class)
@@ -238,10 +336,130 @@ class IncrementalContextAA(
             record(ktType)
         }
     }
+
+    override fun logBeforeCacheFlush(outputs: Set<File>, sourceToOutputs: Map<File, Set<File>>) {
+        super.logBeforeCacheFlush(outputs, sourceToOutputs)
+        val lookupRecords = if (loggingOptions.incrementalLoggingEnabled) dumpLookupRecords() else emptyMap()
+        logLookupGraph(lookupRecords)
+        logDependencyGraphFrom(loggingOptions.dependencyGraphOriginName, lookupRecords)
+        logFiles.forEach { it.close() }
+    }
+
+    /**
+     * Computes the dependency graph from [origin] using a normal BFS and logs it as a Graphviz `.dot` file.
+     */
+    private fun logDependencyGraphFrom(origin: String?, lookupRecords: Map<String, List<String>>) {
+        if (!loggingOptions.incrementalLoggingEnabled) {
+            return
+        }
+
+        if (origin == null) {
+            return
+        }
+
+        if (origin.isBlank()) {
+            return
+        }
+
+        val allDefinedSyms = mutableMapOf<File, MutableSet<LookupSymbolWrapper>>()
+        symbolsMap.forEach { (file, syms) ->
+            allDefinedSyms.getOrPut(file, ::mutableSetOf).addAll(syms)
+        }
+        updatedSymbols.keySet().forEach { file ->
+            allDefinedSyms.getOrPut(file, ::mutableSetOf).addAll(updatedSymbols[file])
+        }
+
+        // Prepare edges
+        val edges = mutableMapOf<String, MutableSet<String>>()
+        lookupRecords.forEach { (fqn, paths) ->
+            paths.forEach { path ->
+                if (NoSourceFile.isSyntheticFile(path)) {
+                    val fqnSource = stripSyntheticFileNameModifiers(path)
+                    edges.getOrPut(fqnSource, ::mutableSetOf).add(fqn)
+                } else {
+                    val file = File(path)
+                    val syms = allDefinedSyms[file]
+                    if (!syms.isNullOrEmpty()) {
+                        syms.forEach { sym ->
+                            val fqnSource = "${sym.scope}.${sym.name}"
+                            edges.getOrPut(fqnSource, ::mutableSetOf).add(fqn)
+                        }
+                    } else {
+                        // Default back to the path so we can visualize errors
+                        edges.getOrPut(path, ::mutableSetOf).add(fqn)
+                    }
+                }
+            }
+        }
+
+        // BFS
+        val visited = mutableSetOf<String>()
+        val queue = ArrayDeque<String>()
+        val bfsEdges = mutableSetOf<Pair<String, String>>()
+        if (edges.contains(origin)) {
+            visited.add(origin)
+            queue.add(origin)
+        }
+        while (queue.isNotEmpty()) {
+            val curr = queue.removeFirst()
+            edges[curr]?.forEach { next ->
+                bfsEdges.add(curr to next)
+                if (visited.add(next)) {
+                    queue.add(next)
+                }
+            }
+        }
+
+        // Log graph
+        mkFileInLogDir("kspLookupGraphOrigin.dot").bufferedWriter().use { logFile ->
+            logFile.write("digraph {\n")
+            // Always add origin vertex
+            logFile.write("  \"$origin\";\n")
+            bfsEdges.sortedWith(compareBy({ it.first }, { it.second })).forEach { (u, v) ->
+                logFile.write("  \"$u\" -> \"$v\";\n")
+            }
+            logFile.write("}\n")
+        }
+    }
+
+    private fun logLookupGraph(lookupRecords: Map<String, List<String>>) {
+        if (!loggingOptions.incrementalLoggingEnabled) {
+            return
+        }
+
+        mkLogFile("kspLookupGraph.log").bufferedWriter().use { logFile ->
+            lookupRecords.forEach { (fqn, paths) ->
+                paths.forEach {
+                    logFile.write("$it -> $fqn\n")
+                }
+            }
+        }
+    }
 }
 
 internal fun recordLookup(ktType: KaType, context: KSNode?) =
     ResolverAAImpl.instance.incrementalContext.recordLookup(ktType, context)
+
+/**
+ * Records a reference to `MyClass::class`.
+ * 
+ * @param ktType the referenced type, e.g., `MyClass`
+ * @param declaration the closest enclosing declaration where the reference occurs.
+ *                    Callers can use [KSNode.findParentDeclaration] to obtain the enclosing declaration.
+ */
+internal fun recordClassReferenceLookup(ktType: KaType, declaration: KSDeclaration) =
+    ResolverAAImpl.instance.incrementalContext.recordClassReferenceLookup(ktType, declaration)
+
+/**
+ * Records a reference to `MyClass::class`.
+ * 
+ * @param fqn the fully qualified name of the referenced type, e.g., the fully qualified name of `MyClass`.
+ * @param declaration the closest enclosing declaration where the reference occurs.
+ *                    Callers can use [KSNode.findParentDeclaration] to obtain the enclosing declaration.
+ *
+ */
+internal fun recordClassReferenceLookup(fqn: String, declaration: KSDeclaration) =
+    ResolverAAImpl.instance.incrementalContext.recordClassReferenceLookup(fqn, declaration)
 
 internal fun recordLookupWithSupertypes(ktType: KaType, extra: (KaType, PsiJavaFile) -> Unit = { _, _ -> }) =
     ResolverAAImpl.instance.incrementalContext.recordLookupWithSupertypes(ktType, mutableSetOf(), extra)
@@ -265,7 +483,7 @@ internal fun recordGetSealedSubclasses(classDeclaration: KSClassDeclaration) {
     }
 }
 
-class LookupTrackerWrapperImpl(val lookupTracker: LookupTracker) : LookupTrackerWrapper {
+class LookupTrackerWrapperImpl(val lookupTracker: LookupTracker, val trackerLogFile: Writer?) : LookupTrackerWrapper {
     override val lookups: MultiMap<LookupSymbolWrapper, String>
         get() = MultiMap<LookupSymbolWrapper, String>().also { wrapper ->
             (lookupTracker as LookupTrackerImpl).lookups.entrySet().forEach { e ->
@@ -274,6 +492,7 @@ class LookupTrackerWrapperImpl(val lookupTracker: LookupTracker) : LookupTracker
         }
 
     override fun record(filePath: String, scopeFqName: String, name: String) {
+        trackerLogFile?.write("$scopeFqName.$name $filePath\n")
         lookupTracker.record(filePath, Position.NO_POSITION, scopeFqName, ScopeKind.PACKAGE, name)
     }
 }

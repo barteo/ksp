@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:Suppress("InternalAgpApiUsage")
+
 package com.google.devtools.ksp.gradle
 
 import com.android.build.api.artifact.ScopedArtifact
@@ -25,9 +27,10 @@ import com.android.build.api.variant.impl.FlatSourceDirectoriesForJavaImpl
 import com.android.build.api.variant.impl.FlatSourceDirectoriesImpl
 import com.android.build.gradle.BaseExtension
 import com.android.build.gradle.api.SourceKind
-import com.google.devtools.ksp.gradle.utils.canUseAddGeneratedSourceDirectoriesApi
+import com.android.build.gradle.internal.component.ComponentCreationConfig
 import com.google.devtools.ksp.gradle.utils.canUseInternalKspApis
 import com.google.devtools.ksp.gradle.utils.isAgpBuiltInKotlinUsed
+import com.google.devtools.ksp.gradle.utils.isLegacyKaptPluginApplied
 import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.file.Directory
@@ -77,18 +80,29 @@ object AndroidPluginIntegration {
         project: Project,
         kotlinCompilation: KotlinJvmAndroidCompilation,
         kspTaskProvider: TaskProvider<KspAATask>,
-        androidComponent: Component?
+        androidComponent: Component?,
     ) {
         if (androidComponent != null && project.isAgpBuiltInKotlinUsed()) {
             if (project.canUseInternalKspApis()) {
                 val javaSources =
                     (androidComponent.sources.java as? FlatSourceDirectoriesForJavaImpl)?.allButKspAndKaptGenerators()
 
-                val kotlinSources = androidComponent.sources.kotlin?.static
+                val kotlinSources = androidComponent.sources.kotlin?.all
 
                 kspTaskProvider.configure { task ->
                     task.kspConfig.javaSourceRoots.from(javaSources)
                     task.kspConfig.javaSourceRoots.from(kotlinSources)
+                }
+
+                if (project.isLegacyKaptPluginApplied()) {
+                    (androidComponent as? ComponentCreationConfig)
+                        ?.androidResourcesCreationConfig
+                        ?.compiledRClassArtifact
+                        ?.let { compiledRClassArtifact ->
+                            kspTaskProvider.configure { task ->
+                                task.kspConfig.libraries.from(project.files(compiledRClassArtifact))
+                            }
+                        }
                 }
             } else {
                 throw RuntimeException(
@@ -144,7 +158,6 @@ object AndroidPluginIntegration {
         androidComponent: Component?,
     ) {
         if (androidComponent != null &&
-            project.canUseAddGeneratedSourceDirectoriesApi() &&
             project.isAgpBuiltInKotlinUsed()
         ) {
             if (project.canUseInternalKspApis()) {
@@ -227,7 +240,12 @@ object AndroidPluginIntegration {
         // Order is important here as we update task with AGP generated sources and
         // then update AGP with source that KSP will generate.
         // Mixing this up will cause circular dependency in Gradle
-        tryUpdateKspWithAndroidSourceSets(project, kotlinCompilation, kspTaskProvider, androidComponent)
+        tryUpdateKspWithAndroidSourceSets(
+            project,
+            kotlinCompilation,
+            kspTaskProvider,
+            androidComponent,
+        )
 
         registerGeneratedSources(
             project,

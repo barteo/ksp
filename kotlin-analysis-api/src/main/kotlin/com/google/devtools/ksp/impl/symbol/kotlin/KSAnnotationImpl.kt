@@ -20,18 +20,20 @@ package com.google.devtools.ksp.impl.symbol.kotlin
 import com.google.devtools.ksp.common.IdKeyPair
 import com.google.devtools.ksp.common.KSObjectCache
 import com.google.devtools.ksp.common.impl.KSNameImpl
-import com.google.devtools.ksp.impl.symbol.java.KSValueArgumentLiteImpl
-import com.google.devtools.ksp.impl.symbol.java.calcValue
-import com.google.devtools.ksp.symbol.*
-import com.intellij.psi.PsiAnnotationMethod
-import com.intellij.psi.PsiArrayInitializerMemberValue
-import com.intellij.psi.PsiClass
-import com.intellij.psi.impl.compiled.ClsClassImpl
-import org.jetbrains.kotlin.analysis.api.KaImplementationDetail
+import com.google.devtools.ksp.impl.symbol.kotlin.KSAnnotationOps.findAbsentDefaultArguments
+import com.google.devtools.ksp.impl.symbol.kotlin.KSAnnotationOps.findDefaultArguments
+import com.google.devtools.ksp.symbol.AnnotationUseSiteTarget
+import com.google.devtools.ksp.symbol.KSAnnotation
+import com.google.devtools.ksp.symbol.KSName
+import com.google.devtools.ksp.symbol.KSNode
+import com.google.devtools.ksp.symbol.KSTypeReference
+import com.google.devtools.ksp.symbol.KSValueArgument
+import com.google.devtools.ksp.symbol.KSVisitor
+import com.google.devtools.ksp.symbol.Location
+import com.google.devtools.ksp.symbol.NonExistLocation
+import com.google.devtools.ksp.symbol.Origin
 import org.jetbrains.kotlin.analysis.api.annotations.KaAnnotation
-import org.jetbrains.kotlin.analysis.api.impl.base.annotations.KaBaseNamedAnnotationValue
-import org.jetbrains.kotlin.analysis.api.symbols.KaSymbolOrigin
-import org.jetbrains.kotlin.descriptors.annotations.AnnotationUseSiteTarget.*
+import org.jetbrains.kotlin.descriptors.annotations.AnnotationUseSiteTarget as KaAnnotationUseSiteTarget
 import org.jetbrains.kotlin.psi.KtAnnotationEntry
 
 // TODO: implement a psi based version of annotation application.
@@ -70,57 +72,19 @@ class KSAnnotationImpl private constructor(
         val presentArgs = annotationApplication.arguments.map {
             KSValueArgumentImpl.getCached(it, this, origin)
         }
-        val presentNames = presentArgs.mapNotNull { it.name?.asString() }
-        val absentArgs = defaultArguments.filter {
-            it.name?.asString() !in presentNames
-        }
-        presentArgs + absentArgs
+        presentArgs +
+            findAbsentDefaultArguments(this, presentArgs) +
+            listOfNotNull(
+                KSAnnotationOps.findAbsentVararg(
+                    this,
+                    annotationApplication.classId,
+                    annotationApplication.arguments
+                )
+            )
     }
 
-    @OptIn(KaImplementationDetail::class)
     override val defaultArguments: List<KSValueArgument> by lazy {
-        analyze {
-            annotationApplication.classId?.toKtClassSymbol()?.let { symbol ->
-                if (
-                    symbol.origin == KaSymbolOrigin.JAVA_SOURCE && symbol.psi != null &&
-                    symbol.psi !is ClsClassImpl && symbol.psi is PsiClass
-                ) {
-                    (symbol.psi as PsiClass).allMethods.filterIsInstance<PsiAnnotationMethod>()
-                        .mapNotNull { annoMethod ->
-                            annoMethod.defaultValue?.let { value ->
-                                val calculatedValue: Any? = if (value is PsiArrayInitializerMemberValue) {
-                                    value.initializers.map {
-                                        calcValue(it)
-                                    }
-                                } else {
-                                    calcValue(value)
-                                }
-                                KSValueArgumentLiteImpl(
-                                    KSNameImpl.getCached(annoMethod.name),
-                                    calculatedValue,
-                                    this@KSAnnotationImpl,
-                                    Origin.SYNTHETIC,
-                                    value.toLocation()
-                                )
-                            }
-                        }
-                } else {
-                    symbol.memberScope.constructors.singleOrNull()?.let {
-                        it.valueParameters.mapNotNull { valueParameterSymbol ->
-                            val constantValue = valueParameterSymbol.getDefaultValue() ?: return@mapNotNull null
-                            KSValueArgumentImpl.getCached(
-                                KaBaseNamedAnnotationValue(
-                                    valueParameterSymbol.name,
-                                    constantValue
-                                ),
-                                this@KSAnnotationImpl,
-                                Origin.SYNTHETIC
-                            )
-                        }
-                    }
-                }
-            } ?: emptyList()
-        }
+        findDefaultArguments(this, annotationApplication.classId)
     }
 
     override val shortName: KSName by lazy {
@@ -130,16 +94,16 @@ class KSAnnotationImpl private constructor(
     override val useSiteTarget: AnnotationUseSiteTarget? by lazy {
         when (ktAnnotationEntry.useSiteTarget?.getAnnotationUseSiteTarget()) {
             null -> null
-            FILE -> AnnotationUseSiteTarget.FILE
-            PROPERTY -> AnnotationUseSiteTarget.PROPERTY
-            FIELD -> AnnotationUseSiteTarget.FIELD
-            PROPERTY_GETTER -> AnnotationUseSiteTarget.GET
-            PROPERTY_SETTER -> AnnotationUseSiteTarget.SET
-            RECEIVER -> AnnotationUseSiteTarget.RECEIVER
-            CONSTRUCTOR_PARAMETER -> AnnotationUseSiteTarget.PARAM
-            SETTER_PARAMETER -> AnnotationUseSiteTarget.SETPARAM
-            PROPERTY_DELEGATE_FIELD -> AnnotationUseSiteTarget.DELEGATE
-            ALL -> AnnotationUseSiteTarget.ALL
+            KaAnnotationUseSiteTarget.FILE -> AnnotationUseSiteTarget.FILE
+            KaAnnotationUseSiteTarget.PROPERTY -> AnnotationUseSiteTarget.PROPERTY
+            KaAnnotationUseSiteTarget.FIELD -> AnnotationUseSiteTarget.FIELD
+            KaAnnotationUseSiteTarget.PROPERTY_GETTER -> AnnotationUseSiteTarget.GET
+            KaAnnotationUseSiteTarget.PROPERTY_SETTER -> AnnotationUseSiteTarget.SET
+            KaAnnotationUseSiteTarget.RECEIVER -> AnnotationUseSiteTarget.RECEIVER
+            KaAnnotationUseSiteTarget.CONSTRUCTOR_PARAMETER -> AnnotationUseSiteTarget.PARAM
+            KaAnnotationUseSiteTarget.SETTER_PARAMETER -> AnnotationUseSiteTarget.SETPARAM
+            KaAnnotationUseSiteTarget.PROPERTY_DELEGATE_FIELD -> AnnotationUseSiteTarget.DELEGATE
+            KaAnnotationUseSiteTarget.ALL -> AnnotationUseSiteTarget.ALL
         }
     }
 

@@ -291,18 +291,34 @@ class AnnoOnProperty {
         Assume.assumeFalse(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
         val gradleRunner = GradleRunner.create().withProjectDir(project.root)
 
-        // Warmup build to download and extract Kotlin Native compiler
-        gradleRunner.withArguments(
-            "--no-configuration-cache",
-            ":workload-linuxX64:assemble"
-        ).build()
+        // Add a klib-only iosArm64 target to workload-linuxX64 and to its project dependency
+        // (:annotations), so that the skip condition has cross-compilation metadata of a
+        // project dependency to consult.
+        val buildScript = File(project.root, "workload-linuxX64/build.gradle.kts")
+        buildScript.writeText(
+            buildScript.readText().replace(
+                "linuxX64() {",
+                "iosArm64() {\n    }\n    linuxX64() {"
+            )
+        )
+        buildScript.appendText("\ndependencies {\n    add(\"kspIosArm64\", project(\":test-processor\"))\n}\n")
+        val annotationsBuildScript = File(project.root, "annotations/build.gradle.kts")
+        annotationsBuildScript.writeText(
+            annotationsBuildScript.readText().replace(
+                "linuxX64() {",
+                "iosArm64() {\n    }\n    linuxX64() {"
+            )
+        )
+        project.appendProperty(
+            "org.gradle.configuration-cache.inputs.unsafe.ignore.file-system-checks=~/.konan/**"
+        )
 
-        // First run: calculates and stores configuration cache
         val result1 = gradleRunner.withArguments(
             "--configuration-cache",
             "--configuration-cache-problems=fail",
-            ":workload-linuxX64:assemble"
+            ":workload-linuxX64:compileKotlinIosArm64"
         ).build()
+        Assert.assertEquals(TaskOutcome.SUCCESS, result1.task(":workload-linuxX64:kspKotlinIosArm64")?.outcome)
         Assert.assertTrue(
             "Expected 'Configuration cache entry stored.' but output was:\n${result1.output}",
             result1.output.contains("Configuration cache entry stored.")
@@ -312,7 +328,7 @@ class AnnoOnProperty {
         val result2 = gradleRunner.withArguments(
             "--configuration-cache",
             "--configuration-cache-problems=fail",
-            ":workload-linuxX64:assemble"
+            ":workload-linuxX64:compileKotlinIosArm64"
         ).build()
         Assert.assertTrue(
             "Expected 'Reusing configuration cache.' but output was:\n${result2.output}",
@@ -412,6 +428,45 @@ class AnnoOnProperty {
             Assert.assertTrue(File(genDir, "Main_dot_kt.kt").exists())
             Assert.assertFalse(File(genDir, "ToBeRemoved_dot_kt.kt").exists())
             checkExecutionOptimizations(it.output)
+        }
+    }
+
+    @Test
+    fun testNativeKlibDeclarations() {
+        Assume.assumeFalse(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+        val gradleRunner = GradleRunner.create().withProjectDir(project.root)
+
+        gradleRunner.withArguments(
+            "--configuration-cache-problems=warn",
+            "clean",
+            ":workload-klib:kspKotlinLinuxX64"
+        ).build().let {
+            Assert.assertEquals(TaskOutcome.SUCCESS, it.task(":workload-klib:kspKotlinLinuxX64")?.outcome)
+            Assert.assertTrue(
+                it.output.contains(
+                    "w: [ksp] round 0 com.somedependency package declarations: [com.somedependency.AnotherDepClass, com.somedependency.SomeDepClass]"
+                )
+            )
+            Assert.assertTrue(
+                it.output.contains(
+                    "w: [ksp] round 1 com.somedependency package declarations: [com.somedependency.AnotherDepClass, com.somedependency.SomeDepClass]"
+                )
+            )
+            Assert.assertTrue(
+                it.output.contains(
+                    "w: [ksp] round 0 com.myapp package declarations: [com.myapp.AnotherAppClass, com.myapp.MyAppClass, com.myapp.anotherAppFunction, com.myapp.myAppFunction]"
+                )
+            )
+            Assert.assertTrue(
+                it.output.contains(
+                    "w: [ksp] round 1 com.myapp package declarations: [com.myapp.AnotherAppClass, com.myapp.MyAppClass, com.myapp.anotherAppFunction, com.myapp.myAppFunction]"
+                )
+            )
+            Assert.assertTrue(
+                it.output.contains(
+                    "w: [ksp] round 1 com.example package declarations: [com.example.Foo]"
+                )
+            )
         }
     }
 
@@ -528,8 +583,7 @@ class AnnoOnProperty {
         gradleRunner.withArguments(
             "--configuration-cache-problems=warn",
             "clean",
-            ":workload:build",
-            "-Pksp.allow.all.target.configuration=false"
+            ":workload:build"
         ).buildAndFail().apply {
             Assert.assertTrue(
                 messages.all {
@@ -544,6 +598,7 @@ class AnnoOnProperty {
             "--configuration-cache-problems=warn",
             "clean",
             ":workload:build",
+            "-Pksp.allow.all.target.configuration=true"
         ).build().apply {
             Assert.assertTrue(
                 messages.all {

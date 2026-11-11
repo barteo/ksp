@@ -17,8 +17,11 @@
 
 package com.google.devtools.ksp.test
 
+import com.google.devtools.ksp.ApiFeatures
 import com.google.devtools.ksp.InternalKSPException
+import com.google.devtools.ksp.KSApiFeatures
 import com.google.devtools.ksp.processor.AbstractTestProcessor
+import com.google.devtools.ksp.symbol.NonExistLocation
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
@@ -32,16 +35,18 @@ import org.jetbrains.kotlin.cli.jvm.config.addJvmClasspathRoots
 import org.jetbrains.kotlin.codegen.ClassBuilderFactories
 import org.jetbrains.kotlin.codegen.GenerationUtils
 import org.jetbrains.kotlin.codegen.forTestCompile.TestCompilePaths
-import org.jetbrains.kotlin.config.JvmTarget
 import org.jetbrains.kotlin.platform.jvm.JvmPlatforms
 import org.jetbrains.kotlin.psi.KtFile
 import org.jetbrains.kotlin.test.ExecutionListenerBasedDisposableProvider
+import org.jetbrains.kotlin.test.TestInfrastructureInternals
 import org.jetbrains.kotlin.test.builders.TestConfigurationBuilder
 import org.jetbrains.kotlin.test.builders.testConfiguration
 import org.jetbrains.kotlin.test.compileJavaFiles
 import org.jetbrains.kotlin.test.directives.ConfigurationDirectives
+import org.jetbrains.kotlin.test.directives.JsEnvironmentConfigurationDirectives
 import org.jetbrains.kotlin.test.directives.JvmEnvironmentConfigurationDirectives
 import org.jetbrains.kotlin.test.directives.LanguageSettingsDirectives
+import org.jetbrains.kotlin.test.directives.NativeEnvironmentConfigurationDirectives
 import org.jetbrains.kotlin.test.model.DependencyKind
 import org.jetbrains.kotlin.test.model.FrontendKind
 import org.jetbrains.kotlin.test.model.ResultingArtifact
@@ -59,6 +64,9 @@ import org.junit.jupiter.api.TestInfo
 import java.awt.EventQueue
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
+import kotlin.reflect.KClass
+import kotlin.reflect.full.isSubclassOf
+import kotlin.reflect.full.memberProperties
 
 abstract class DisposableTest {
     private var _disposable: Disposable? = null
@@ -76,12 +84,16 @@ abstract class DisposableTest {
     }
 }
 
-abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
+abstract class AbstractKSPTest(frontend: FrontendKind<*>, val apiFeatures: ApiFeatures) : DisposableTest() {
     companion object {
-        const val TEST_PROCESSOR = "// TEST PROCESSOR:"
-        const val PROCESSOR_INPUT = "// PROCESSOR INPUT:"
-        const val EXPECTED_RESULTS = "// EXPECTED:"
-        const val EXPECTED_RESULTS_END = "// END"
+        const val COMMENT_TOKEN = "//"
+        const val TEST_PROCESSOR = "$COMMENT_TOKEN TEST PROCESSOR:"
+        const val PROCESSOR_INPUT = "$COMMENT_TOKEN PROCESSOR INPUT:"
+        const val EXPECTED_RESULTS = "$COMMENT_TOKEN EXPECTED:"
+        const val EXPECT_LINE = "$COMMENT_TOKEN EXPECT"
+        const val EXPECTED_RESULTS_END = "$COMMENT_TOKEN END"
+        const val MODULE = "$COMMENT_TOKEN MODULE:"
+        const val COMPILER_MODULE_NAME = "$COMMENT_TOKEN COMPILER MODULE NAME:"
     }
 
     init {
@@ -130,12 +142,14 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
         testProcessor: AbstractTestProcessor,
     ): List<String>
 
+    @OptIn(TestInfrastructureInternals::class)
     private val configure: TestConfigurationBuilder.() -> Unit = {
         globalDefaults {
             this@globalDefaults.frontend = frontend
             targetPlatform = JvmPlatforms.defaultJvmPlatform
             dependencyKind = DependencyKind.Source
         }
+        useCustomCompilerConfigurationProvider(::CompilerConfigurationProviderImpl)
         useConfigurators(
             ::CommonEnvironmentConfigurator,
             ::JvmEnvironmentConfigurator,
@@ -149,10 +163,12 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
         useDirectives(*AbstractKotlinCompilerTest.defaultDirectiveContainers.toTypedArray())
         useDirectives(JvmEnvironmentConfigurationDirectives)
         useDirectives(TargetPlatformDirectives)
+        useDirectives(ConfigurationDirectives)
+        useDirectives(NativeEnvironmentConfigurationDirectives)
+        useDirectives(JsEnvironmentConfigurationDirectives)
 
         defaultDirectives {
             +JvmEnvironmentConfigurationDirectives.FULL_JDK
-            JvmEnvironmentConfigurationDirectives.JVM_TARGET with JvmTarget.DEFAULT
             +ConfigurationDirectives.WITH_STDLIB
             +LanguageSettingsDirectives.ALLOW_KOTLIN_PACKAGE
         }
@@ -185,7 +201,7 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
     // dist/kotlinc/lib/*
     //
     // No, sourceFileProvider doesn't group files by module unfortunately. Let's do it by ourselves.
-    open fun compileModule(module: TestModule, testServices: TestServices) {
+    open fun compileLibraryModule(module: TestModule, testServices: TestServices) {
         val javaFiles = module.writeJavaFiles()
         val compilerConfiguration = testServices.compilerConfigurationProvider.getCompilerConfiguration(
             module,
@@ -237,16 +253,25 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
     }
 
     /**
-     * Runs a negative test, asserting that the implementation throws an [InternalKSPException].
+     * Runs a negative test, asserting that the implementation throws a throwable
+     * that is a subtype of [expectedThrowableType].
+     *
      * The test fails if that particular exception is not thrown, e.g., by not throwing at all
      * or by throwing a different exception.
+     *
+     * @param path the path to the test file.
+     * @param expectedThrowableType the type of the expected throwable. Defaults to [InternalKSPException].
      */
-    fun runThrowingTest(@TestDataFile path: String) {
+    fun runThrowingTest(@TestDataFile path: String, expectedThrowableType: KClass<*> = InternalKSPException::class) {
         val (_, run) = loadTest(path)
         try {
             run()
-            Assertions.fail("Expected InternalKSPException, but the run was successful.")
-        } catch (_: InternalKSPException) {
+            Assertions.fail("Expected ${expectedThrowableType.simpleName ?: "null"} but the run was successful.")
+        } catch (e: Throwable) {
+            if (!e::class.isSubclassOf(expectedThrowableType)) {
+                // Fail by rethrowing to get better feedback
+                throw e
+            }
             // Succeed by returning
         }
     }
@@ -273,7 +298,7 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
         val libModules = moduleStructure.modules.dropLast(1)
 
         for (lib in libModules) {
-            compileModule(lib, testServices)
+            compileLibraryModule(lib, testServices)
         }
         val compilerConfigurationMain = testServices.compilerConfigurationProvider.getCompilerConfiguration(
             mainModule,
@@ -283,40 +308,13 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
 
         val fileContents = mainModule.files.first().originalFile.readLines()
 
-        val testProcessorName = fileContents
-            .single { it.startsWith(TEST_PROCESSOR) }
-            .substringAfter(TEST_PROCESSOR)
-            .trim()
+        val processorArguments = parseProcessorArguments(fileContents)
+        val processorClass = mkTestProcessorClass(parseTestProcessorName(fileContents))
+        val testProcessor = mkProcessor(processorArguments, processorClass)
 
-        val testAnnotationNames = fileContents
-            .find { it.startsWith(PROCESSOR_INPUT) }
-            ?.substringAfter(PROCESSOR_INPUT)
-            ?.split(',')
-            ?.map { it.trim() }
-
-        val processorClass = Class.forName("com.google.devtools.ksp.processor.$testProcessorName")
-
-        val testProcessor: AbstractTestProcessor =
-            if (testAnnotationNames == null) {
-                // Instantiate processor class without constructor params
-                processorClass
-                    .getDeclaredConstructor()
-                    .newInstance() as AbstractTestProcessor
-            } else {
-                // Instantiate parameterized processor class
-                processorClass
-                    .getDeclaredConstructor(List::class.java)
-                    .newInstance(testAnnotationNames) as AbstractTestProcessor
-            }
-
-        val expected = fileContents
-            .dropWhile { !it.startsWith(EXPECTED_RESULTS) }
-            .drop(1)
-            .takeWhile { !it.startsWith(EXPECTED_RESULTS_END) }
-            .joinToString("\n") {
-                // Remove '// ' prefix
-                it.substring(3).trim()
-            }
+        val expected = parseExpectedOutput(fileContents)[ApiFeaturesTestHelpers.from(apiFeatures)]
+            ?.joinToString("\n")
+            ?: ""
 
         val actual = {
             runTest(
@@ -327,7 +325,159 @@ abstract class AbstractKSPTest(frontend: FrontendKind<*>) : DisposableTest() {
             ).joinToString("\n")
         }
 
-        return Pair(expected, actual)
+        return expected to actual
+    }
+
+    private fun mkTestProcessorClass(testProcessorName: String): Class<*> =
+        Class.forName("com.google.devtools.ksp.processor.$testProcessorName")
+
+    private fun parseTestProcessorName(fileContents: List<String>): String = fileContents
+        .single { it.startsWith(TEST_PROCESSOR) }
+        .substringAfter(TEST_PROCESSOR)
+        .trim()
+
+    private fun parseProcessorArguments(fileContents: List<String>): List<String>? = fileContents
+        .find { it.startsWith(PROCESSOR_INPUT) }
+        ?.substringAfter(PROCESSOR_INPUT)
+        ?.split(',')
+        ?.map { it.trim() }
+
+    /**
+     * Given the test file content, [parseExpectedOutput] returns a map of expected test results/output based
+     * on the [apiFeatures] configuration. Thus, given the feature toggle, the caller may index into the
+     * returned map to obtain the expected test results.
+     *
+     * [parseExpectedOutput] removes directives such as `EXPECT ENABLE_BACKING_FIELDS = TRUE` and removes dangling
+     * whitespace and comments. In other words, if `// MyExpectedOutput` is declared in the test file,
+     * the value `"MyExpectedOutput"` is in the returned list for all configurations.
+     */
+    private fun parseExpectedOutput(fileContents: List<String>): Map<ApiFeatures, List<String>> {
+        val rawExpectedOutput =
+            fileContents
+                .dropWhile { !it.startsWith(EXPECTED_RESULTS) }
+                .drop(1)
+                .takeWhile { !it.startsWith(EXPECTED_RESULTS_END) }
+
+        return buildMap<ApiFeatures, MutableList<String>> {
+            rawExpectedOutput.forEach { line ->
+                if (line.startsWith(EXPECT_LINE)) {
+                    // The expectation is combination of feature values
+                    val featureConfigStrings = line
+                        .drop(EXPECT_LINE.length)
+                        .takeWhile { it != ':' }
+                        .split(',')
+                        .map { it.trim() }
+
+                    val expectedValue = line.dropWhile { it != ':' }.drop(1).trim()
+                    val parsedFeatures = ApiFeaturesTestHelpers.parse(featureConfigStrings)
+                    parsedFeatures.forEach { parsedFeatures ->
+                        getOrPut(parsedFeatures, ::mutableListOf)
+                            .add(expectedValue)
+                    }
+                } else {
+                    // Add the expectation to all configurations
+                    ApiFeaturesTestHelpers.ALL_COMBINATIONS.forEach { apiFeatures ->
+                        getOrPut(apiFeatures, ::mutableListOf)
+                            .add(line.drop(COMMENT_TOKEN.length).trim())
+                    }
+                }
+            }
+        }
+    }
+
+    private fun mkProcessor(
+        processorArguments: List<String>?,
+        processorClass: Class<*>
+    ): AbstractTestProcessor = if (processorArguments == null) {
+        // Instantiate processor class with apiFeatures param
+        processorClass
+            .getDeclaredConstructor(ApiFeatures::class.java)
+            .newInstance(this.apiFeatures) as AbstractTestProcessor
+    } else {
+        // Instantiate parameterized processor class
+        processorClass
+            .getDeclaredConstructor(List::class.java, ApiFeatures::class.java)
+            .newInstance(processorArguments, this.apiFeatures) as AbstractTestProcessor
+    }
+
+    internal object ApiFeaturesTestHelpers {
+
+        val ALL_COMBINATIONS = setOf(
+            KSApiFeatures(enableBackingFields = true, enableContextParameters = true),
+            KSApiFeatures(enableBackingFields = true, enableContextParameters = false),
+            KSApiFeatures(enableBackingFields = false, enableContextParameters = true),
+            KSApiFeatures(enableBackingFields = false, enableContextParameters = false),
+        )
+
+        @JvmStatic
+        fun from(apiFeatures: ApiFeatures): KSApiFeatures =
+            apiFeatures as? KSApiFeatures ?: KSApiFeatures(
+                enableBackingFields = apiFeatures.enableBackingFields,
+                enableContextParameters = apiFeatures.enableContextParameters
+            )
+
+        /**
+         * Parses a string of the form `ENABLE_FEATURE = BOOLEAN` where whitespace is optional.
+         * `ENABLE_FEATURE` is a screaming snake case version of the properties in [ApiFeatures]
+         * and `BOOLEAN` is just the uppercase string representation of a boolean literal `true, false`.
+         *
+         * @return the set of [KSApiFeatures] configurations in [ALL_COMBINATIONS] that match the directive.
+         */
+        @JvmStatic
+        fun parse(str: String): Set<KSApiFeatures> =
+            str
+                .trim()
+                .split('=')
+                .map { it.trim() }
+                .let {
+                    val expectedSize = 2
+                    if (it.size != expectedSize) {
+                        throw InternalKSPException(
+                            message = "Expected list size to be exactly $expectedSize in ApiFeaturesImpl.parse. Was ${it.size}: $it",
+                            location = NonExistLocation,
+                            originatingClass = this.javaClass
+                        )
+                    }
+
+                    // Enumerate the properties of [ApiFeatures]
+                    // and look up the property based on the screaming snake case representation.
+                    val propertyByScreamingSnakeCase = ApiFeatures::class.memberProperties
+                        .associateBy { property -> camelCaseToScreamingSnakeCase(property.name) }
+
+                    val lhs = it[0]
+                    val rhs = it[1].lowercase().toBooleanStrict()
+                    val property = propertyByScreamingSnakeCase[lhs]
+                        ?: throw InternalKSPException(
+                            message = "Unknown feature '$lhs' in ApiFeatures directive. Supported features: ${propertyByScreamingSnakeCase.keys}",
+                            location = NonExistLocation,
+                            originatingClass = this.javaClass
+                        )
+
+                    ALL_COMBINATIONS.filter { config -> property.get(config) == rhs }.toSet()
+                }
+
+        @JvmStatic
+        fun parse(strs: Collection<String>): Set<KSApiFeatures> {
+            // Check for duplicate assignments
+            val duplicateFeatures = strs
+                .map { it.substringBefore('=').trim() }
+                .groupBy { it }
+                .filterValues { it.size > 1 }
+                .keys
+
+            if (duplicateFeatures.isNotEmpty()) {
+                throw InternalKSPException(
+                    message = "Feature(s) assigned multiple values in EXPECT directive: ${duplicateFeatures.joinToString()}",
+                    location = NonExistLocation,
+                    originatingClass = this.javaClass
+                )
+            }
+
+            return strs.map(::parse).fold(ALL_COMBINATIONS) { acc, matching -> acc intersect matching }
+        }
+
+        private fun camelCaseToScreamingSnakeCase(str: String): String =
+            str.replace(Regex("(?<=[a-z0-9])(?=[A-Z])"), "_").uppercase()
     }
 }
 

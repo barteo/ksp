@@ -17,6 +17,7 @@
 
 package com.google.devtools.ksp.impl
 
+import com.google.devtools.ksp.ApiFeatures
 import com.google.devtools.ksp.common.AnyChanges
 import com.google.devtools.ksp.common.IncrementalContextBase
 import com.google.devtools.ksp.common.KSObjectCacheManager
@@ -40,14 +41,21 @@ import com.intellij.mock.MockProject
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runWriteAction
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.vfs.StandardFileSystems
+import com.intellij.psi.PsiFileSystemItem
+import com.intellij.psi.PsiJavaFile
+import com.intellij.psi.PsiManager
 import com.intellij.util.ui.EDT
 import org.jetbrains.kotlin.config.KotlinCompilerVersion
 import org.jetbrains.kotlin.platform.JsPlatform
 import org.jetbrains.kotlin.platform.TargetPlatform
 import org.jetbrains.kotlin.platform.jvm.JdkPlatform
 import org.jetbrains.kotlin.platform.konan.NativePlatform
+import org.jetbrains.kotlin.psi.KtFile
 import java.io.File
+import java.nio.file.Path
 
 class KotlinSymbolProcessing(
     val kspConfig: KSPConfig,
@@ -133,7 +141,7 @@ class KotlinSymbolProcessing(
                 kspConfig.incremental,
                 dualLookupTracker,
                 File(anyChangesWildcard.filePath).relativeTo(kspConfig.projectBaseDir),
-                kspConfig.incrementalLog,
+                kspConfig.incrementalContextLoggingOptions,
                 kspConfig.projectBaseDir,
                 kspConfig.cachesDir,
                 kspConfig.outputBaseDir,
@@ -145,6 +153,7 @@ class KotlinSymbolProcessing(
             var newKSFiles = allDirtyKSFiles
 
             val targetPlatform = ResolverAAImpl.ktModule.targetPlatform
+            val processorsRegisteredForUpcomingFeatures = mutableSetOf<SymbolProcessor>()
             val symbolProcessorEnvironment = SymbolProcessorEnvironment(
                 kspConfig.processorOptions,
                 kspConfig.languageVersion.toKotlinVersion(),
@@ -153,20 +162,25 @@ class KotlinSymbolProcessing(
                 kspConfig.apiVersion.toKotlinVersion(),
                 KotlinCompilerVersion.getVersion().toKotlinVersion(),
                 targetPlatform.getPlatformInfo(kspConfig),
-                KotlinVersion(2, 0)
+                KotlinVersion(2, 0),
+                registerProcessorForNewFeatures = processorsRegisteredForUpcomingFeatures::add
             )
 
-            // Load and instantiate processsors
+            // Load and instantiate processors
             val deferredSymbols = mutableMapOf<SymbolProcessor, List<Restorable>>()
             val processors = providers.map { provider ->
                 provider.create(symbolProcessorEnvironment).also { deferredSymbols[it] = mutableListOf() }
             }
 
+            // Emit warning for processors not opted in to new features
+            computeFeatureOptInWarnings(processors, processorsRegisteredForUpcomingFeatures)
+                .forEach { warning -> logger.info(warning, null) }
+
             fun dropCaches() {
                 maybeRunInWriteAction {
                     session.dropCaches()
-                    KSObjectCacheManager.clear()
                 }
+                KSObjectCacheManager.clear()
             }
 
             // Run processors until either
@@ -185,13 +199,15 @@ class KotlinSymbolProcessing(
                     allDirtyKSFiles,
                     project,
                     incrementalContext,
-                    resolutionStrategy
+                    resolutionStrategy,
+                    processorsRegisteredForUpcomingFeatures
                 )
                 ResolverAAImpl.instance = resolver
                 ResolverAAImpl.instance.functionAsMemberOfCache = mutableMapOf()
                 ResolverAAImpl.instance.propertyAsMemberOfCache = mutableMapOf()
 
                 processors.forEach { processor ->
+                    resolver.currentProcessor = processor
                     incrementalContext.closeFilesOnException {
                         deferredSymbols[processor] =
                             processor.process(resolver)
@@ -226,6 +242,7 @@ class KotlinSymbolProcessing(
 
             // Call onError() or finish()
             if (logger.hasError) {
+                runTypeCheck(newKSFiles, project, logger)
                 processors.forEach(SymbolProcessor::onError)
             } else {
                 processors.forEach(SymbolProcessor::finish)
@@ -246,16 +263,101 @@ class KotlinSymbolProcessing(
         } finally {
             if (rebuildEveryRun)
                 cachesUpToDate.delete()
+            KSObjectCacheManager.clear()
+            ResolverAAImpl.tearDown()
+            KSPCoreEnvironment.tearDown()
+            KcExtras.tearDown()
             maybeRunInWriteAction {
-                session?.close()
                 Disposer.dispose(projectDisposable)
-                ResolverAAImpl.tearDown()
-                KSPCoreEnvironment.tearDown()
-                KcExtras.tearDown()
+                session?.close()
             }
         }
 
         return if (logger.hasError) ExitCode.PROCESSING_ERROR else ExitCode.OK
+    }
+
+    private fun computeDisabledApiFeatures(apiFeatures: ApiFeatures): List<String> = buildList {
+        if (!apiFeatures.enableBackingFields) {
+            add(ApiFeatures::enableBackingFields.name)
+        }
+        if (!apiFeatures.enableContextParameters) {
+            add(ApiFeatures::enableContextParameters.name)
+        }
+    }
+
+    private fun computeFeatureOptInWarnings(
+        processors: List<SymbolProcessor>,
+        processorsRegisteredForUpcomingFeatures: Set<SymbolProcessor>
+    ): List<String> = buildList {
+        for (processor in processors) {
+            val processorName = processor::class.qualifiedName ?: processor::class.simpleName
+            val disabledFeatures = computeDisabledApiFeatures(processor.apiFeatures)
+            if (processor in processorsRegisteredForUpcomingFeatures) {
+                add(
+                    "Processor '$processorName' " +
+                        "opted in for upcoming features via 'SymbolProcessorEnvironment.registerProcessorForNewFeatures'. " +
+                        "Note that 'SymbolProcessorEnvironment.registerProcessorForNewFeatures' is deprecated; " +
+                        "processors should instead migrate to configuring 'SymbolProcessor.apiFeatures'."
+                )
+            } else if (!processor.apiFeatures.enableBackingFields && !processor.apiFeatures.enableContextParameters) {
+                add(
+                    "Processor '$processorName' " +
+                        "has not opted in for upcoming features yet. " +
+                        "It might break in a future version of KSP. " +
+                        "To fix this, please update the processor to a version that is " +
+                        "compatible with upcoming features."
+                )
+                add(
+                    "Note that 'SymbolProcessorEnvironment.registerProcessorForNewFeatures' is deprecated; " +
+                        "processors should instead migrate to configuring 'SymbolProcessor.apiFeatures'."
+                )
+            }
+            if (disabledFeatures.isNotEmpty()) {
+                add(
+                    "Processor '$processorName' " +
+                        "has not enabled the following API features: ${disabledFeatures.joinToString(", ")}. " +
+                        "It might break in a future version of KSP. " +
+                        "To fix this, please configure the set of 'apiFeatures' in 'SymbolProcessorProvider' " +
+                        "when creating the 'SymbolProcessor' (e.g., using 'buildApiFeatures'). " +
+                        "Processors should eventually enable all features in 'ApiFeatures'."
+                )
+            }
+        }
+    }
+
+    companion object {
+        fun List<KSFile>.toKtFiles(project: Project): List<KtFile> =
+            getPsiFilesFromPaths<KtFile>(project, this.toPathSet())
+
+        fun List<KSFile>.toPsiJavaFiles(project: Project): List<PsiJavaFile> =
+            getPsiFilesFromPaths<PsiJavaFile>(project, this.toPathSet())
+
+        fun List<KSFile>.toPathSet(): Set<Path> = this.map { File(it.filePath).toPath() }.toSet()
+
+        fun runTypeCheck(newKSFiles: List<KSFile>, project: Project, logger: KSPLogger) {
+            val (kotlinKSFiles, javaKSFiles) = newKSFiles
+                .partition { it.origin == Origin.KOTLIN }
+            KspDiagnostics.runTypeCheck(javaKSFiles.toPsiJavaFiles(project), kotlinKSFiles.toKtFiles(project), logger)
+        }
+    }
+}
+
+internal inline fun <reified T : PsiFileSystemItem> getPsiFilesFromPaths(
+    project: Project,
+    paths: Set<Path>,
+): List<T> {
+    val fs = StandardFileSystems.local()
+    val psiManager = PsiManager.getInstance(project)
+    return buildList {
+        for (path in paths) {
+            val vFile = fs.findFileByPath(path.toString()) ?: continue
+            val psiFileSystemItem =
+                if (vFile.isDirectory)
+                    psiManager.findDirectory(vFile) as? T
+                else
+                    psiManager.findFile(vFile) as? T
+            psiFileSystemItem?.let { add(it) }
+        }
     }
 }
 

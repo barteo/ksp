@@ -78,10 +78,17 @@ interface KcExtras {
 
     /**
      * The default value of a Java annotation method as an annotation value:
-     * [default] (or an unknown argument when it is null) converted with
-     * `toFirExpression` and `FirAnnotationValueConverter`.
+     * [default] converted with `toFirExpression` and `FirAnnotationValueConverter`.
      */
-    fun javaAnnotationDefault(symbol: KaValueParameterSymbol, default: JavaAnnotationArgument?): KaAnnotationValue?
+    fun javaAnnotationDefault(symbol: KaValueParameterSymbol, default: JavaAnnotationArgument): KaAnnotationValue?
+
+    /**
+     * The default value of a parameter of an annotation class from a KLib, as
+     * recorded in its metadata: `firSymbol.fir.defaultValue` converted with
+     * `FirAnnotationValueConverter`, else null. Metadata records annotation
+     * parameter defaults only from version 2.2 on (KT-59526).
+     */
+    fun libraryAnnotationDefault(symbol: KaValueParameterSymbol): KaAnnotationValue?
 
     /** Makes the symbol's types available: `firSymbol.lazyResolveToPhase(TYPES)`. */
     fun resolveTypes(symbol: KaSymbol)
